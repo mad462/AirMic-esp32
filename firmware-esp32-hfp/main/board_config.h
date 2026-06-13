@@ -1,0 +1,10 @@
+#pragma once
+
+#define INMP441_BCLK_GPIO 4
+#define INMP441_WS_GPIO   17
+#define INMP441_DIN_GPIO  15
+#define STATUS_LED_GPIO   2
+#define PTT_BUTTON_GPIO   13
+#define TONE_A_BUTTON_GPIO 25
+#define TONE_B_BUTTON_GPIO 26
+#define TONE_C_BUTTON_GPIO 27

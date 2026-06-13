@@ -1,0 +1,2 @@
+WATCHER	pnp_modify_failed	配额违规 
+STATUS	default_comm=<none>	default_multi=<none>	airmic=耳机 (ESP32-AirMic-HFP Hands-Free)	airmic_state=Unplugged	any_input=false	device_present=true	bt_connected=false

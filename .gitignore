@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Build outputs
+build/
+dist/
+
+# IDE
+.idea/
+
+# Local runtime/config
+.venv/
+venv/
+
+# Temp captures
+tmp-*.png
