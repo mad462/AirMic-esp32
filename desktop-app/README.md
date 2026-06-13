@@ -1,14 +1,161 @@
-# AirMic Desktop App
+# AirMic 桌面应用
 
-PySide6 desktop application for:
+这是 AirMic 项目的 Windows 上位机应用，基于 PySide6 实现，负责连接设备侧 HFP 音频链路与桌面端快捷键、状态显示、参数调试之间的桥接。
 
-- HFP tone monitoring
-- shortcut mapping
-- Windows audio device routing
-- serial-based device tuning
-- AirMic background listener control
+它不是一个单纯的配置面板，而是当前方案里的核心后台控制端，主要承担以下职责：
 
-## 启动
+- 后台启动并维护 HFP 音频监听
+- 读取探针输出并解码控制音
+- 将 `Start / Tone A / Tone B / Tone C` 映射为快捷键动作
+- 展示监听服务状态、设备状态、系统输入状态
+- 在调试台打开时，通过串口读取和下发设备参数
 
-- 双击 `start_airmic_desktop.bat`
-- 需要看控制台输出时，用 `start_airmic_desktop_debug.bat`
+## 目录说明
+
+- `app`
+  主界面、调试窗口、样式和控件实现。
+- `core`
+  应用内模型、快捷键预设、控制音解码等纯逻辑层。
+- `services`
+  后台协调器、探针服务、状态监听服务、快捷键发送服务。
+- `tools`
+  辅助工具，包括音频探针、开发热重载脚本、诊断脚本。
+- `tests`
+  针对状态解析、快捷键、UI 行为、控制音解析等的测试。
+- `migration_staging`
+  从旧 Tkinter / 过渡期方案迁移过来的历史脚本，保留用于参考，不是当前主线入口。
+
+## 技术栈
+
+- Python 3
+- PySide6
+- Windows WASAPI
+- C# / NAudio 音频探针
+- Windows 串口通信
+
+## 当前主要功能
+
+### 1. 后台监听
+
+应用会在启动后自动拉起后台监听流程：
+
+- 启动 HFP 音频探针
+- 等待 `ESP32-AirMic-HFP` 输入设备变为 `Active`
+- 监听控制音和音量信息
+- 根据解码结果触发快捷键动作
+
+### 2. 快捷键映射
+
+当前界面支持：
+
+- `Start Tone` 固定映射主语音触发动作
+- `Tone A / Tone B / Tone C` 自定义录制快捷键
+- 快捷键测试
+- 快捷键设置持久化保存
+
+### 3. 设备状态检测
+
+应用同时维护三类用户可见状态：
+
+- 监听服务状态
+- 设备状态
+- 系统输入状态
+
+这些状态不是只靠串口判断，而是综合了：
+
+- WASAPI 端点状态
+- 默认输入设备状态
+- AirMic HFP 端点是否存在 / 是否激活
+- 音频状态观察器的 PnP / 蓝牙提示
+
+### 4. 调试台
+
+调试台打开后会启用串口能力，用于：
+
+- 查看当前设备音频参数
+- 调整麦克风增益
+- 调整采样位移
+- 调整噪声门
+- 调整控制音增益
+- 应用参数到设备
+
+调试台关闭后，应用会尽量避免长期占用串口，减少对烧录和正常使用的影响。
+
+## 启动方式
+
+### 普通启动
+
+双击：
+
+```bat
+start_airmic_desktop.bat
+```
+
+### 带控制台输出启动
+
+用于查看启动报错或日志：
+
+```bat
+start_airmic_desktop_debug.bat
+```
+
+### 开发模式启动
+
+用于本地调试 Python 文件修改后的自动重启：
+
+```bat
+start_airmic_desktop_dev.bat
+```
+
+其底层会运行：
+
+```bash
+python tools/dev_runner.py
+```
+
+## 依赖安装
+
+如果本机尚未安装依赖，可以在 `desktop-app` 目录执行：
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+`start_airmic_desktop.bat` 也会在发现缺少 `PySide6` 时自动尝试安装依赖。
+
+## 运行入口
+
+应用主入口：
+
+```bash
+python -m app.main
+```
+
+## 音频探针说明
+
+桌面应用依赖 `tools/audio_probe/bin` 中的探针程序：
+
+- `AirMicAudioProbe_v5.exe`
+  主音频监听探针，用于 HFP 输入音频捕获、RMS 输出和控制音识别。
+- `AirMicAudioProbe_status.exe`
+  状态观察探针，用于监听 AirMic 相关音频端点、默认输入和设备存在状态。
+
+应用本身不直接在 Python 里承担所有底层音频枚举和解码逻辑，而是通过这些探针把 Windows 音频状态转换成稳定、可解析的文本事件流。
+
+## 当前限制
+
+- 当前实现面向 Windows。
+- 快捷键触发依赖本机桌面会话。
+- HFP 链路是否自动重连，仍受 Windows 蓝牙驱动和系统策略影响。
+- 串口调参只在调试台打开时可用，不是主界面的长期后台依赖。
+
+## 与固件的关系
+
+本应用默认与 `firmware-esp32-hfp` 目录下的 ESP32 固件配套使用，双方约定了：
+
+- HFP 设备名称
+- 控制音编码格式
+- 串口命令格式
+- 设备状态识别方式
+
+如果后续改动固件里的控制音频率、串口协议或设备名称，上位机也需要同步调整。

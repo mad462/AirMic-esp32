@@ -1,1 +1,0 @@
-STATUS	default_comm=<none>	default_multi=<none>	airmic=耳机 (ESP32-AirMic-HFP Hands-Free)	airmic_state=Unplugged	any_input=false
