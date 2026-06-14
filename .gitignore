@@ -1,20 +1,23 @@
-# Python
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 .pytest_cache/
 
 # Build outputs
 build/
 dist/
+desktop-app/build_pyinstaller/
+desktop-app/dist/
+desktop-app/AirMicDesktop.spec
+desktop-app/build_pyinstaller_icon.ico
 
-# IDE
+# IDE / env
 .idea/
-
-# Local runtime/config
 .venv/
 venv/
 
-# Temp captures
+# Temp captures / local noise
 tmp-*.png
+.DS_Store
+Thumbs.db

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from app.runtime_paths import tool_path
 
 PROBE_EVENT_TONE = "tone"
 PROBE_EVENT_RMS = "rms"
@@ -103,13 +104,18 @@ class ProbeService:
         min_audio_timeout_ms: int = DEFAULT_MIN_AUDIO_TIMEOUT_MS,
     ) -> None:
         self.project_root = project_root
-        self.probe_exe = probe_exe or (project_root / "tools" / "audio_probe" / "bin" / "AirMicAudioProbe_v5.exe")
+        self.probe_exe = probe_exe or tool_path("audio_probe", "bin", "AirMicAudioProbe_v5.exe")
         self.probe_name = probe_name
         self.min_audio_timeout_ms = min_audio_timeout_ms
         self.watchdog = ProbeWatchdog(min_audio_timeout_s=min_audio_timeout_ms / 1000.0)
         self.process: subprocess.Popen[str] | None = None
         self.thread: threading.Thread | None = None
         self.stop_requested = threading.Event()
+
+    def is_running(self) -> bool:
+        thread_alive = self.thread is not None and self.thread.is_alive()
+        process_alive = self.process is not None and self.process.poll() is None
+        return bool(thread_alive and process_alive)
 
     def build_command(self) -> list[str]:
         return [
@@ -155,6 +161,7 @@ class ProbeService:
             if emit_log:
                 emit_log("tone monitor already running")
             return False
+        self.cleanup_stale_processes(emit_log=emit_log)
         self.stop_requested.clear()
         self.thread = threading.Thread(
             target=self._thread_main,
@@ -177,6 +184,45 @@ class ProbeService:
                     proc.kill()
                 except Exception:
                     pass
+        thread = self.thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self.process = None
+        self.thread = None
+
+    def cleanup_stale_processes(self, emit_log: Callable[[str], None] | None = None) -> None:
+        target_dir = str(self.probe_exe.resolve().parent).lower()
+        script = """
+$targets = @('AirMicAudioProbe_v5.exe','AirMicAudioProbe_status.exe')
+$targetDir = $args[0].ToLower()
+Get-CimInstance Win32_Process |
+    Where-Object { $targets -contains $_.Name } |
+    ForEach-Object {
+        $path = if ([string]::IsNullOrWhiteSpace($_.ExecutablePath)) { '' } else { $_.ExecutablePath.ToLower() }
+        if ($path -and $path.StartsWith($targetDir)) {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Output $_.Name
+        }
+    }
+"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script, target_dir],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            if emit_log:
+                emit_log(f"cleanup stale probe processes failed: {exc}")
+            return
+
+        killed = sum(1 for line in result.stdout.splitlines() if line.strip())
+        if killed and emit_log:
+            emit_log(f"cleaned {killed} stale probe process(es)")
 
     def _thread_main(self, emit: Callable[[ProbeEvent], None], emit_log: Callable[[str], None] | None) -> None:
         if emit_log:
@@ -203,6 +249,7 @@ class ProbeService:
             if emit_log:
                 emit_log(f"tone probe start failed: {exc}")
             self.process = None
+            self.thread = None
             return
 
         proc = self.process
@@ -221,6 +268,7 @@ class ProbeService:
                     except Exception:
                         pass
             self.process = None
+            self.thread = None
 
     def _iter_stdout(self, stream: Iterable[str]) -> Iterable[str]:
         for line in stream:

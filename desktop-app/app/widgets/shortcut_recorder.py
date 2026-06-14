@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, Qt as QtCoreQt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QPushButton, QWidget
 
@@ -9,6 +9,8 @@ from services.global_shortcut_recorder import GlobalShortcutRecorder, ShortcutRe
 
 class ShortcutRecorderButton(QPushButton):
     shortcutRecorded = Signal(tuple)
+    recordingStateChanged = Signal(bool)
+    recordingCompleted = Signal(tuple)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("点击录制", parent)
@@ -20,10 +22,11 @@ class ShortcutRecorderButton(QPushButton):
         self._recording = False
         self._shortcut_keys: tuple[str, ...] = ()
         self._display_text = "点击录制"
-        self._recorder = GlobalShortcutRecorder(self._finish_recording)
+        self._recorder = GlobalShortcutRecorder(self.recordingCompleted.emit)
         self._recording_state = ShortcutRecordingState()
 
         self.clicked.connect(self._handle_click)
+        self.recordingCompleted.connect(self._finish_recording, QtCoreQt.QueuedConnection)
 
     @property
     def shortcut_keys(self) -> tuple[str, ...]:
@@ -45,6 +48,7 @@ class ShortcutRecorderButton(QPushButton):
         self._recorder.stop()
         self._recording_state = ShortcutRecordingState()
         self._apply_recording_style(False)
+        self.recordingStateChanged.emit(False)
         self.setText(self._display_text)
 
     def _handle_click(self) -> None:
@@ -55,10 +59,14 @@ class ShortcutRecorderButton(QPushButton):
         self._recorder.reset()
         self._recording_state = ShortcutRecordingState()
         self._apply_recording_style(True)
+        self.recordingStateChanged.emit(True)
         self.setText("请按下组合键...")
         self.setFocus(Qt.MouseFocusReason)
         started = self._recorder.start()
         if not started:
+            self._recording = False
+            self._apply_recording_style(False)
+            self.recordingStateChanged.emit(False)
             self.setText("录制器已在运行")
 
     def _finish_recording(self, recorded: tuple[str, ...]) -> None:
@@ -69,6 +77,7 @@ class ShortcutRecorderButton(QPushButton):
         self._recorder.stop()
         self._recording_state = ShortcutRecordingState()
         self._apply_recording_style(False)
+        self.recordingStateChanged.emit(False)
         self.set_display_text(self._format_shortcut_text(recorded))
         self.shortcutRecorded.emit(recorded)
 

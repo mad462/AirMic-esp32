@@ -2,8 +2,9 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from tools.dev_runner import collect_python_files, snapshot_mtimes, has_changes
+from tools.dev_runner import collect_python_files, snapshot_mtimes, has_changes, run_dev_loop
 
 
 class DevRunnerTest(unittest.TestCase):
@@ -33,6 +34,37 @@ class DevRunnerTest(unittest.TestCase):
             after = snapshot_mtimes(files)
 
             self.assertTrue(has_changes(before, after))
+
+    def test_run_dev_loop_does_not_restart_when_gui_exits_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            for name in ("app", "core", "services"):
+                (project_root / name).mkdir()
+
+            class FakeProcess:
+                def __init__(self):
+                    self.returncode = 0
+                    self._poll_calls = 0
+
+                def poll(self):
+                    self._poll_calls += 1
+                    return 0 if self._poll_calls >= 1 else None
+
+            launches: list[FakeProcess] = []
+
+            def fake_launch(_project_root: Path) -> FakeProcess:
+                proc = FakeProcess()
+                launches.append(proc)
+                return proc
+
+            with mock.patch("tools.dev_runner.launch_app", side_effect=fake_launch), mock.patch(
+                "tools.dev_runner.terminate_process"
+            ) as terminate_process, mock.patch("tools.dev_runner.time.sleep", side_effect=KeyboardInterrupt):
+                exit_code = run_dev_loop(project_root)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(launches), 1)
+            terminate_process.assert_called_once()
 
 
 if __name__ == "__main__":

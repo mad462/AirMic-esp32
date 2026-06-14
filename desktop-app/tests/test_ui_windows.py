@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -10,6 +12,7 @@ from app.windows.main_window import MainWindow
 from services.backend_coordinator import BackendStatus
 from core.models.app_state import AudioDeviceStatusSnapshot, DeviceCommandResult, SerialPortStatusSnapshot
 from services.backend_coordinator import BackendCoordinator
+from services.settings_service import SettingsService
 
 
 class MainWindowUiTest(unittest.TestCase):
@@ -18,9 +21,19 @@ class MainWindowUiTest(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         cls.scale = DesignScaleContext(scale_factor=1.0, use_design_scaling=True, ui_scale_multiplier=1.5)
 
-    def test_main_window_matches_console_layout_labels(self):
-        window = MainWindow(scale=self.scale)
+    def _make_window(self) -> MainWindow:
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        coordinator = BackendCoordinator(
+            settings_service=SettingsService(Path(temp_dir.name) / "airmic-settings.json"),
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+        window = MainWindow(scale=self.scale, coordinator=coordinator)
         self.addCleanup(window.close)
+        return window
+
+    def test_main_window_matches_console_layout_labels(self):
+        window = self._make_window()
 
         self.assertEqual(window.windowTitle(), "AirMic 控制台")
         self.assertEqual(window.width(), 900)
@@ -38,8 +51,7 @@ class MainWindowUiTest(unittest.TestCase):
 
     def test_status_row_stays_on_one_line(self):
         scale = DesignScaleContext(scale_factor=2.0, use_design_scaling=True, ui_scale_multiplier=1.5)
-        window = MainWindow(scale=scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         window.show()
         self.app.processEvents()
 
@@ -48,8 +60,7 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertGreaterEqual(window.system_input_button.x(), window.device_status_button.x())
 
     def test_start_tone_is_fixed_and_aux_tones_are_recordable(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         self.assertEqual(window.tone_rows["start"].value_button.text(), "right Alt")
         self.assertFalse(window.tone_rows["start"].value_button.isEnabled())
@@ -60,8 +71,7 @@ class MainWindowUiTest(unittest.TestCase):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
         original_interval = MainWindow.TEST_SHORTCUT_COUNTDOWN_MS
         MainWindow.TEST_SHORTCUT_COUNTDOWN_MS = 20
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         window.coordinator.shortcut_service.sender = lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
 
         try:
@@ -118,8 +128,7 @@ class MainWindowUiTest(unittest.TestCase):
             MainWindow.TEST_SHORTCUT_COUNTDOWN_MS = original_interval
 
     def test_record_button_captures_letter_shortcut_from_keyboard(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         window.show()
         self.app.processEvents()
 
@@ -128,13 +137,17 @@ class MainWindowUiTest(unittest.TestCase):
         self.app.processEvents()
 
         QTest.keyClick(record_button, Qt.Key_A)
-        self.app.processEvents()
+
+        import time
+        deadline = time.time() + 1.0
+        while time.time() < deadline and window.tone_rows["tone_a"].value_button.text() != "A":
+            self.app.processEvents()
+            time.sleep(0.02)
 
         self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "A")
 
     def test_record_button_captures_ctrl_plus_a_from_keyboard(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         window.show()
         self.app.processEvents()
 
@@ -143,13 +156,89 @@ class MainWindowUiTest(unittest.TestCase):
         self.app.processEvents()
 
         QTest.keyClick(record_button, Qt.Key_A, Qt.ControlModifier)
-        self.app.processEvents()
+
+        import time
+        deadline = time.time() + 1.0
+        while time.time() < deadline and window.tone_rows["tone_a"].value_button.text() != "Ctrl+A":
+            self.app.processEvents()
+            time.sleep(0.02)
 
         self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "Ctrl+A")
 
+    def test_background_shortcut_update_is_handled_on_ui_thread(self):
+        import threading
+        import time
+
+        window = self._make_window()
+        window.show()
+        self.app.processEvents()
+
+        main_thread_id = threading.get_ident()
+        called_threads: list[int] = []
+        original = window.coordinator.set_custom_tone_action
+
+        def capture(slot_id: str, keys: tuple[str, ...]) -> None:
+            called_threads.append(threading.get_ident())
+            original(slot_id, keys)
+
+        window.coordinator.set_custom_tone_action = capture  # type: ignore[method-assign]
+
+        record_button = window.tone_rows["tone_a"].value_button
+        record_button.click()
+        self.app.processEvents()
+
+        worker = threading.Thread(target=lambda: record_button.recordingCompleted.emit(("left_ctrl", "a")))
+        worker.start()
+        worker.join(timeout=1.0)
+
+        deadline = time.time() + 1.0
+        while time.time() < deadline and not called_threads:
+            self.app.processEvents()
+            time.sleep(0.02)
+
+        self.assertTrue(called_threads)
+        self.assertEqual(called_threads[-1], main_thread_id)
+        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "Ctrl+A")
+
+    def test_recording_one_tone_disables_other_aux_tone_controls(self):
+        window = self._make_window()
+        window.show()
+        self.app.processEvents()
+
+        tone_a_button = window.tone_rows["tone_a"].value_button
+        tone_b_button = window.tone_rows["tone_b"].value_button
+        tone_c_button = window.tone_rows["tone_c"].value_button
+        tone_b_test = window.tone_rows["tone_b"].test_button
+        tone_c_test = window.tone_rows["tone_c"].test_button
+
+        tone_a_button.click()
+        self.app.processEvents()
+
+        self.assertTrue(tone_a_button.isEnabled())
+        self.assertFalse(tone_b_button.isEnabled())
+        self.assertFalse(tone_c_button.isEnabled())
+        self.assertFalse(tone_b_test.isEnabled())
+        self.assertFalse(tone_c_test.isEnabled())
+
+    def test_finishing_recording_restores_other_aux_tone_controls(self):
+        window = self._make_window()
+        window.show()
+        self.app.processEvents()
+
+        tone_a_button = window.tone_rows["tone_a"].value_button
+        tone_b_button = window.tone_rows["tone_b"].value_button
+        tone_b_test = window.tone_rows["tone_b"].test_button
+
+        tone_a_button.click()
+        self.app.processEvents()
+        QTest.keyClick(tone_a_button, Qt.Key_A)
+        self.app.processEvents()
+
+        self.assertTrue(tone_b_button.isEnabled())
+        self.assertTrue(tone_b_test.isEnabled())
+
     def test_close_hides_window_instead_of_destroying_it(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         window.show()
         self.app.processEvents()
 
@@ -158,6 +247,25 @@ class MainWindowUiTest(unittest.TestCase):
 
         self.assertFalse(window.isVisible())
         self.assertFalse(window._quit_requested)
+
+
+    def test_quit_from_tray_stops_timers_and_backend(self):
+        coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
+        stop_calls: list[str] = []
+        leave_calls: list[str] = []
+        coordinator.stop = lambda: stop_calls.append("stop")  # type: ignore[method-assign]
+        coordinator.leave_debug_mode = lambda: leave_calls.append("leave")  # type: ignore[method-assign]
+        window = MainWindow(scale=self.scale, coordinator=coordinator)
+        self.addCleanup(window.close)
+
+        self.assertTrue(window.runtime_refresh_timer.isActive())
+        window.quit_from_tray()
+        self.app.processEvents()
+
+        self.assertFalse(window.runtime_refresh_timer.isActive())
+        self.assertFalse(window.startup_probe_timer.isActive())
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertEqual(leave_calls, ["leave"])
 
     def test_tray_menu_shows_status_restart_and_quit_entries(self):
         coordinator = BackendCoordinator(
@@ -210,15 +318,13 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertEqual(called, ["checked"])
 
     def test_device_status_uses_clickable_status_link_button(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         self.assertTrue(window.device_status_button.property("statusLink"))
         self.assertEqual(window.device_status_button.cursor().shape(), Qt.PointingHandCursor)
 
     def test_tray_menu_uses_app_styling_hooks(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         menu = window.tray_icon.contextMenu()
         self.assertEqual(menu.objectName(), "trayMenu")
@@ -241,8 +347,7 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertTrue(fake_handle.called)
 
     def test_debug_window_uses_debug_console_labels(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         debug_window = window.log_window
         self.assertEqual(debug_window.windowTitle(), "AirMic 调试台")
@@ -255,17 +360,22 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertFalse(debug_window.close_button.icon().isNull())
 
     def test_debug_window_value_column_uses_borderless_line_edits(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         debug_window = window.log_window
         self.assertIsInstance(debug_window.gain_row.value_input, QLineEdit)
         self.assertEqual(debug_window.gain_row.value_input.objectName(), "debugValueInput")
         self.assertEqual(debug_window.gain_row.slider.maximum(), 4096)
 
+    def test_debug_window_contains_startup_toggle(self):
+        window = self._make_window()
+
+        debug_window = window.log_window
+        self.assertEqual(debug_window.startup_checkbox.text(), "开机启动")
+        self.assertFalse(debug_window.startup_checkbox.isChecked())
+
     def test_debug_slider_sits_close_to_value_input(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         debug_window = window.log_window
         debug_window.show()
         self.app.processEvents()
@@ -276,8 +386,7 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertLessEqual(gap, 16)
 
     def test_debug_value_input_uses_fixed_narrow_width(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
         debug_window = window.log_window
 
         self.assertLessEqual(debug_window.gain_row.value_input.maximumWidth(), 80)
@@ -438,8 +547,7 @@ class MainWindowUiTest(unittest.TestCase):
             MainWindow.RUNTIME_REFRESH_MS = original_interval
 
     def test_inactive_status_values_use_muted_style(self):
-        window = MainWindow(scale=self.scale)
-        self.addCleanup(window.close)
+        window = self._make_window()
 
         window.coordinator.status = BackendStatus(
             listener_phase="error",

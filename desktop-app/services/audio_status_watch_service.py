@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from app.runtime_paths import tool_path
 from core.models.app_state import AudioDeviceStatusSnapshot
 
 
@@ -97,7 +98,7 @@ def parse_status_watch_line(text: str) -> AudioStatusWatchEvent | None:
 class AudioStatusWatchService:
     def __init__(self, project_root: Path, watch_exe: Path | None = None, name_filter: str = "ESP32-AirMic-HFP") -> None:
         self.project_root = project_root
-        self.watch_exe = watch_exe or (project_root / "tools" / "audio_probe" / "bin" / "AirMicAudioProbe_status.exe")
+        self.watch_exe = watch_exe or tool_path("audio_probe", "bin", "AirMicAudioProbe_status.exe")
         self.name_filter = name_filter
         self.process: subprocess.Popen[str] | None = None
         self.thread: threading.Thread | None = None
@@ -132,6 +133,7 @@ class AudioStatusWatchService:
     ) -> bool:
         if self.thread and self.thread.is_alive():
             return False
+        self.cleanup_stale_processes(emit_log=emit_log)
         self.stop_requested.clear()
         self.thread = threading.Thread(
             target=self._thread_main,
@@ -154,6 +156,40 @@ class AudioStatusWatchService:
                     proc.kill()
                 except Exception:
                     pass
+        thread = self.thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self.process = None
+        self.thread = None
+
+    def cleanup_stale_processes(self, emit_log: Callable[[str], None] | None = None) -> None:
+        target_dir = str(self.watch_exe.resolve().parent).lower()
+        script = """
+$targets = @('AirMicAudioProbe_v5.exe','AirMicAudioProbe_status.exe')
+$targetDir = $args[0].ToLower()
+Get-CimInstance Win32_Process |
+    Where-Object { $targets -contains $_.Name } |
+    ForEach-Object {
+        $path = if ([string]::IsNullOrWhiteSpace($_.ExecutablePath)) { '' } else { $_.ExecutablePath.ToLower() }
+        if ($path -and $path.StartsWith($targetDir)) {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Output $_.Name
+        }
+    }
+"""
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script, target_dir],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            if emit_log:
+                emit_log(f"cleanup stale status-watch processes failed: {exc}")
 
     def _thread_main(
         self,
@@ -182,6 +218,7 @@ class AudioStatusWatchService:
             if emit_log:
                 emit_log(f"audio status watcher start failed: {exc}")
             self.process = None
+            self.thread = None
             return
 
         proc = self.process
@@ -210,3 +247,4 @@ class AudioStatusWatchService:
                     except Exception:
                         pass
             self.process = None
+            self.thread = None

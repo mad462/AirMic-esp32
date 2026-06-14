@@ -59,6 +59,17 @@ class ShortcutCatalogTest(unittest.TestCase):
             ],
         )
 
+    def test_shortcut_service_diagnostic_snapshot_includes_active_keys(self):
+        service = ShortcutService(sender=lambda keys, down, mode: None)
+        service.press(("right_alt",))
+        service._get_async_key_state = lambda key_name: 0x8000 if key_name == "right_alt" else 0  # type: ignore[method-assign]
+
+        snapshot = service.diagnostic_snapshot()
+
+        self.assertIn("active=右 Alt", snapshot)
+        self.assertIn("os_down=右 Alt", snapshot)
+        self.assertIn("mode=scan", snapshot)
+
 
 if __name__ == "__main__":
     unittest.main()

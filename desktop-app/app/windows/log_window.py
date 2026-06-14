@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models.app_state import AudioTuningSnapshot
+from app.runtime_paths import app_asset_path, app_icon_path
 from app.styles.scaling import DesignScaleContext
 from app.windows.frameless import FramelessDraggableWindow
 from services.backend_coordinator import BackendCoordinator, BackendStatus
@@ -75,8 +77,10 @@ class LogWindow(FramelessDraggableWindow):
         super().__init__()
         self.scale = scale or DesignScaleContext()
         self.coordinator = coordinator
-        assets_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
-        self._close_icon = QIcon(str(assets_dir / "x.svg"))
+        self._close_icon = QIcon(str(app_asset_path("icons", "x.svg")))
+        self._app_icon = QIcon(str(app_icon_path()))
+        if not self._app_icon.isNull():
+            self.setWindowIcon(self._app_icon)
         self.setWindowTitle("AirMic 调试台")
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         debug_width = self.scale.scale_design_px(600)
@@ -175,10 +179,16 @@ class LogWindow(FramelessDraggableWindow):
         self.serial_status_value_label = QLabel("", wrapper)
         self.serial_status_value_label.setObjectName("debugMetaValue")
 
+        self.startup_checkbox = QCheckBox("开机启动", wrapper)
+        self.startup_checkbox.setObjectName("debugStartupCheckbox")
+        self.startup_checkbox.setProperty("noWindowDrag", True)
+        self.startup_checkbox.toggled.connect(self.coordinator.set_startup_enabled)
+
         layout.addWidget(self.port_prefix_label)
         layout.addWidget(self.port_combo)
         layout.addWidget(self.serial_status_prefix_label)
         layout.addWidget(self.serial_status_value_label)
+        layout.addWidget(self.startup_checkbox)
         layout.addStretch(1)
         return wrapper
 
@@ -290,8 +300,14 @@ class LogWindow(FramelessDraggableWindow):
 
     def _refresh_from_status(self, status: BackendStatus) -> None:
         self.serial_status_value_label.setText(self.coordinator.serial_status_text())
+        self.startup_checkbox.blockSignals(True)
+        self.startup_checkbox.setChecked(status.startup_enabled)
+        self.startup_checkbox.blockSignals(False)
         self.log_view.setPlainText(self.coordinator.log_text())
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
+        self.startup_checkbox.blockSignals(True)
+        self.startup_checkbox.setChecked(status.startup_enabled)
+        self.startup_checkbox.blockSignals(False)
 
         self.port_combo.blockSignals(True)
         current_ids = [self.port_combo.itemData(index) for index in range(self.port_combo.count())]

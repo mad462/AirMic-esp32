@@ -32,11 +32,14 @@ from core.shortcut.presets import (
     get_action_preset_by_id,
     get_voice_model_preset_by_id,
 )
+from app.runtime_paths import app_root, tool_path
 from services.probe_service import ProbeEvent
 from services.shortcut_service import ShortcutService
 from services.probe_service import ProbeService
 from services.audio_status_watch_service import AudioStatusWatchEvent, AudioStatusWatchService
 from services.settings_service import SettingsService
+from services.startup_service import StartupService
+from services.diagnostics_log_service import DiagnosticsLogService
 
 try:
     import sounddevice as sd
@@ -111,6 +114,7 @@ class BackendStatus:
     serial_port_state: str = "unknown"
     serial_port_detail: str = ""
     device_record_mode: str = "ptt"
+    startup_enabled: bool = False
 
 
 class BackendCoordinator(QObject):
@@ -127,15 +131,20 @@ class BackendCoordinator(QObject):
         serial_status_provider: Callable[[str, list[str]], SerialPortStatusSnapshot] | None = None,
         device_command_sender: Callable[[str, list[str]], DeviceCommandResult] | None = None,
         settings_service: SettingsService | None = None,
+        startup_service: StartupService | None = None,
+        diagnostics_log_service: DiagnosticsLogService | None = None,
     ) -> None:
         super().__init__()
         self.status = BackendStatus()
         self._settings_service = settings_service or SettingsService()
+        self._startup_service = startup_service or StartupService()
+        self._diagnostics_log_service = diagnostics_log_service or DiagnosticsLogService()
         self._restore_persisted_settings()
+        self.status.startup_enabled = self._startup_service.is_enabled()
         self.logs: list[LogEntry] = []
         self._listeners: list[Callable[[BackendStatus], None]] = []
         self.shortcut_service = ShortcutService(sender=shortcut_sender)
-        resolved_root = project_root or Path(__file__).resolve().parents[1]
+        resolved_root = project_root or app_root()
         self.probe_service = ProbeService(project_root=resolved_root)
         self.audio_status_watch_service = AudioStatusWatchService(project_root=resolved_root)
         self._serial_port_provider = serial_port_provider or self._list_serial_ports
@@ -153,6 +162,10 @@ class BackendCoordinator(QObject):
         self.command_ports: list[DeviceOption] = []
         self._debug_serial_enabled = False
         self._runtime_refresh_inflight = False
+        self._last_probe_event_at = time.monotonic()
+        self._last_probe_recovery_at = 0.0
+        self._stuck_shortcut_timeout_s = 1.0
+        self._shortcut_recording_slot: str | None = None
         self.runtimeSnapshotReady.connect(self._handle_runtime_snapshot_ready, Qt.QueuedConnection)
         self.audioStatusWatchEventReady.connect(self._handle_audio_status_watch_event_ready, Qt.QueuedConnection)
         self.refresh_runtime_state()
@@ -248,6 +261,7 @@ class BackendCoordinator(QObject):
         self.status.summary = "后台监听服务运行中"
         self.status.detail = "等待 HFP 音频回调与编码事件；当前为桌面应用骨架状态。"
         self._append_log("INFO", "后台监听服务已启动。")
+        self._append_diagnostic("service", f"started state={self.status.state} listener={self.status.listener_phase}")
         self._notify()
 
     def stop(self) -> None:
@@ -258,6 +272,7 @@ class BackendCoordinator(QObject):
         self.status.summary = "后台监听已停止"
         self.status.detail = "快捷键和串口命令通道已进入空闲状态。"
         self._append_log("INFO", "后台监听服务已停止。")
+        self._append_diagnostic("service", f"stopped state={self.status.state} listener={self.status.listener_phase}")
         self._notify()
 
     def restart(self) -> None:
@@ -270,6 +285,7 @@ class BackendCoordinator(QObject):
         self.status.summary = "后台监听服务运行中"
         self.status.detail = "监听进程已重启，等待设备与音频链路就绪。"
         self._append_log("INFO", "后台监听服务已重启。")
+        self._append_diagnostic("service", f"restarted state={self.status.state} listener={self.status.listener_phase}")
         self._notify()
         self.start_probe_monitor()
 
@@ -312,6 +328,17 @@ class BackendCoordinator(QObject):
         self.status.command_port = port_id
         self.refresh_runtime_state()
         self._append_log("INFO", f"命令串口已切换为：{port_id}。")
+        self._notify()
+
+    def set_startup_enabled(self, enabled: bool) -> None:
+        applied = self._startup_service.set_enabled(enabled)
+        self.status.startup_enabled = enabled if applied else self._startup_service.is_enabled()
+        if applied:
+            self._append_log("INFO", f"开机启动已{'开启' if enabled else '关闭'}。")
+            self._append_diagnostic("startup", f"enabled={self.status.startup_enabled}")
+        else:
+            self._append_log("WARN", f"开机启动切换失败，当前状态：{'开启' if self.status.startup_enabled else '关闭'}。")
+            self._append_diagnostic("startup", f"apply_failed enabled={self.status.startup_enabled}")
         self._notify()
 
     def refresh_runtime_state(self) -> None:
@@ -363,6 +390,8 @@ class BackendCoordinator(QObject):
             self.status.selected_input_device_id = ""
 
     def tick_runtime_state(self) -> None:
+        self._maybe_force_release_stuck_shortcut()
+        self._maybe_recover_probe_monitor()
         if self._runtime_refresh_inflight:
             return
         self._runtime_refresh_inflight = True
@@ -392,7 +421,10 @@ class BackendCoordinator(QObject):
             self._notify()
 
     def has_active_device_status(self) -> bool:
-        return bool(self.status.detected_airmic_input and self.status.detected_airmic_device_present)
+        return bool(
+            self.status.detected_airmic_device_present
+            or self.status.detected_airmic_input_active
+        )
 
     def has_active_system_input(self) -> bool:
         return _is_airmic_input_name(self.status.current_input_name)
@@ -448,6 +480,7 @@ class BackendCoordinator(QObject):
     def handle_probe_event(self, event: dict[str, object]) -> None:
         event_kind = str(event.get("event_kind", ""))
         raw_text = str(event.get("raw_text", ""))
+        self._last_probe_event_at = time.monotonic()
 
         if event_kind == "tone":
             tone_source = str(event.get("tone_source", "TONE")).upper()
@@ -463,6 +496,7 @@ class BackendCoordinator(QObject):
                 }.get(tone_event)
                 if tone_label:
                     self._handle_tone_label(tone_label)
+                    self._append_diagnostic("tone", f"{tone_source} {tone_event} snapshot={self.shortcut_service.diagnostic_snapshot()}")
             if raw_text:
                 self._append_log("PROBE", raw_text)
             self._notify()
@@ -487,6 +521,7 @@ class BackendCoordinator(QObject):
             self._append_log("ACTION", "已释放当前快捷键。")
         else:
             self._append_log("ACTION", "快捷键本来就是松开状态。")
+        self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
         self._notify()
 
     def test_current_shortcut(self) -> None:
@@ -498,9 +533,14 @@ class BackendCoordinator(QObject):
             return
         self.shortcut_service.tap(keys)
         self._append_log("ACTION", f"已测试快捷键：{action.chord_label}。")
+        self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
         self._notify()
 
     def test_tone_action(self, slot_id: str) -> None:
+        if self._shortcut_recording_slot and slot_id != self._shortcut_recording_slot:
+            self._append_log("INFO", f"正在录制 {self._shortcut_recording_slot} 快捷键，已忽略 {slot_id} 测试。")
+            self._notify()
+            return
         if slot_id == TONE_SLOT_START:
             keys = self._current_start_keys()
             label = self.current_start_action_display_text()
@@ -519,6 +559,20 @@ class BackendCoordinator(QObject):
             return
         self.shortcut_service.tap(keys)
         self._append_log("ACTION", f"已测试 {tone_name}：{label}。")
+        self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
+        self._notify()
+
+    def set_shortcut_recording_slot(self, slot_id: str | None) -> None:
+        normalized = slot_id or None
+        if self._shortcut_recording_slot == normalized:
+            return
+        self._shortcut_recording_slot = normalized
+        if normalized:
+            self._append_log("INFO", f"开始录制 {normalized} 快捷键，已临时屏蔽其它 ABC 动作。")
+            self._append_diagnostic("shortcut", f"recording_slot={normalized}")
+        else:
+            self._append_log("INFO", "快捷键录制结束，已恢复 ABC 动作。")
+            self._append_diagnostic("shortcut", "recording_slot=<none>")
         self._notify()
 
     def start_probe_preview(self) -> None:
@@ -528,7 +582,9 @@ class BackendCoordinator(QObject):
 
     def start_probe_monitor(self) -> None:
         self._append_log("PROBE", "正在启动音频编码监听。")
+        self._append_diagnostic("probe", f"start requested process_alive={bool(self.probe_service.process and self.probe_service.process.poll() is None)}")
         self.status.listener_phase = "starting"
+        self._last_probe_event_at = time.monotonic()
         started = self.probe_service.start(self._handle_probe_event_object, emit_log=self._handle_probe_log_text)
         if started:
             self.status.state = "running"
@@ -543,7 +599,45 @@ class BackendCoordinator(QObject):
         if self.status.state != "stopped":
             self.status.listener_phase = "stopped"
         self._append_log("PROBE", "已请求停止音频编码监听。")
+        self._append_diagnostic("probe", "stop requested")
         self._notify()
+
+    def _maybe_force_release_stuck_shortcut(self) -> None:
+        if not self.shortcut_service.is_pressed:
+            return
+        if (time.monotonic() - self._last_probe_event_at) < self._stuck_shortcut_timeout_s:
+            return
+        if self.shortcut_service.release():
+            self._append_log("WARN", "自动释放卡住的快捷键：超过 1 秒没有新的探针事件。")
+            self._append_diagnostic("shortcut", f"auto_release {self.shortcut_service.diagnostic_snapshot()}")
+            self._notify()
+    def _maybe_recover_probe_monitor(self) -> None:
+        if self.status.state != "running":
+            return
+
+        now = time.monotonic()
+        if now - self._last_probe_recovery_at < 8.0:
+            return
+
+        if not self.probe_service.is_running():
+            self._recover_probe_monitor("探针线程/进程已退出，但设备状态仍在线")
+            return
+
+        if (
+            self.status.listener_phase == "monitoring"
+            and self.has_active_device_status()
+            and (now - self._last_probe_event_at) >= 10.0
+        ):
+            self._recover_probe_monitor("10 秒无探针事件，疑似监听链路卡住")
+
+    def _recover_probe_monitor(self, reason: str) -> None:
+        self._last_probe_recovery_at = time.monotonic()
+        if self.shortcut_service.is_pressed:
+            self.shortcut_service.release()
+            self._append_log("WARN", "自动恢复前已释放当前快捷键，避免按键卡住。")
+        self._append_log("WARN", f"自动重启音频探针：{reason}。")
+        self.stop_probe_monitor()
+        self.start_probe_monitor()
 
     def start_audio_status_watch(self) -> None:
         started = self.audio_status_watch_service.start(
@@ -577,6 +671,7 @@ class BackendCoordinator(QObject):
         self._debug_serial_enabled = True
         self.refresh_runtime_state()
         self._append_log("INFO", "已进入调试台：串口命令通道已启用。")
+        self._append_diagnostic("service", f"debug_mode=on serial={self.status.serial_port_state}")
         self._notify()
 
     def leave_debug_mode(self) -> None:
@@ -587,7 +682,14 @@ class BackendCoordinator(QObject):
         self.status.serial_port_state = "missing"
         self.status.serial_port_detail = "调试台未打开"
         self._append_log("INFO", "已退出调试台：串口命令通道已释放。")
+        self._append_diagnostic("service", "debug_mode=off")
         self._notify()
+
+    def _append_diagnostic(self, category: str, message: str) -> None:
+        try:
+            self._diagnostics_log_service.append(category, message)
+        except Exception as exc:
+            self._append_log("WARN", f"写入本地诊断日志失败：{exc}")
 
     def _append_log(self, level: str, message: str) -> None:
         self.logs.append(
@@ -598,6 +700,8 @@ class BackendCoordinator(QObject):
             )
         )
         self.logs = self.logs[-200:]
+        if level in {"ACTION", "WARN", "ERROR", "EVENT"}:
+            self._append_diagnostic(level.lower(), message)
 
     def _choose_default_serial_port(self, ports: list[str], preferred: str = "COM10") -> str:
         normalized = [port.strip() for port in ports if port and port.strip()]
@@ -742,7 +846,7 @@ class BackendCoordinator(QObject):
         )
 
     def _read_audio_device_status_from_probe(self) -> AudioDeviceStatusSnapshot | None:
-        probe_bin_dir = self.probe_service.project_root / "tools" / "audio_probe" / "bin"
+        probe_bin_dir = tool_path("audio_probe", "bin")
         probe_exe = None
         for candidate_name in ("AirMicAudioProbe_status.exe", "AirMicAudioProbe.exe"):
             candidate = probe_bin_dir / candidate_name
@@ -1009,12 +1113,14 @@ class BackendCoordinator(QObject):
                     self._append_log("ACTION", f"收到 START：触发 {action.chord_label}。")
                 else:
                     self._append_log("ACTION", f"收到 START：{action.chord_label} 已经按下。")
+                self._append_diagnostic("shortcut", f"start {self.shortcut_service.diagnostic_snapshot()}")
             return
         if normalized == "stop tone":
             if self.shortcut_service.release():
                 self._append_log("ACTION", "收到 STOP：已释放当前快捷键。")
             else:
                 self._append_log("ACTION", "收到 STOP：快捷键本来就是松开。")
+            self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
             return
         if normalized == "tone a":
             self._handle_aux_tone(TONE_SLOT_A, "Tone A")
@@ -1026,6 +1132,10 @@ class BackendCoordinator(QObject):
             self._handle_aux_tone(TONE_SLOT_C, "Tone C")
 
     def _handle_aux_tone(self, slot_id: str, label: str) -> None:
+        if self._shortcut_recording_slot and self._shortcut_recording_slot != slot_id:
+            self._append_log("INFO", f"录制快捷键中，已忽略 {label}。")
+            self._append_diagnostic("shortcut", f"ignored_aux={slot_id} recording_slot={self._shortcut_recording_slot}")
+            return
         keys = self._keys_for_slot(slot_id)
         if not keys:
             self._append_log("ACTION", f"{label} 当前未绑定动作。")
@@ -1033,9 +1143,11 @@ class BackendCoordinator(QObject):
         self.shortcut_service.tap(keys)
         if self.status.tone_action_map[slot_id] == "custom":
             self._append_log("ACTION", f"{label} 已触发：{format_key_chord(keys)}。")
+            self._append_diagnostic("shortcut", f"{slot_id} tap {self.shortcut_service.diagnostic_snapshot()}")
             return
         action = get_action_preset_by_id(self.status.tone_action_map[slot_id])
         self._append_log("ACTION", f"{label} 已触发：{action.chord_label}。")
+        self._append_diagnostic("shortcut", f"{slot_id} tap {self.shortcut_service.diagnostic_snapshot()}")
 
     def _format_binding_for_console(self, keys: tuple[str, ...]) -> str:
         if not keys:

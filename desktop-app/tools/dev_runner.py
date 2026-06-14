@@ -83,7 +83,11 @@ def run_dev_loop(project_root: Path) -> int:
 
             if process.poll() is not None:
                 exit_code = process.returncode or 0
-                print(f"[AirMic Dev] GUI exited with code {exit_code}, restarting...")
+                print(f"[AirMic Dev] GUI exited with code {exit_code}")
+                if exit_code == 0:
+                    terminate_process(process)
+                    return 0
+                print("[AirMic Dev] restarting after crash...")
                 process = launch_app(project_root)
                 last_snapshot = current_snapshot
     except KeyboardInterrupt:

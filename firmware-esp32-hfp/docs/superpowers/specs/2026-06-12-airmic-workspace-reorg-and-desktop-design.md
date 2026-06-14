@@ -583,3 +583,92 @@ Proceed with:
 - PySide6 desktop app rebuild with a coordinator/service architecture
 
 This is the cleanest path that matches the actual product direction while preserving the experimental history for reference.
+
+## Implementation Notes
+
+### Version
+
+- Desktop app milestone version: `V1.0.0`
+
+### Bug And Fix Log
+
+The following issues were encountered during the real Windows + ESP32 HFP bring-up and were important enough to document explicitly so they do not get reintroduced later.
+
+#### 1. Duplicate desktop instances polluted the whole chain
+
+Observed behavior:
+
+- Running `start_airmic_desktop.bat` repeatedly could leave multiple `python -m app.main` processes alive.
+- Tray restart/quit looked unreliable because an older instance could still hold background state.
+- Shortcut recording, probe state, and tray status could disagree because more than one app instance was active.
+
+Root cause:
+
+- The old startup path created the main window and started backend services before the single-instance guard had fully rejected the second launch.
+
+Fix:
+
+- Move the single-instance guard to the earliest possible point in `app.main`.
+- Use a Windows-native mutex-backed guard so the second launch is rejected before UI or backend services are created.
+
+Guardrail:
+
+- Any future startup refactor must preserve this order: `create app -> acquire single instance -> create main window -> start backend`.
+
+#### 2. Device online/offline state was too strict
+
+Observed behavior:
+
+- The UI could show `离线` even when the AirMic HFP endpoint had already appeared in Windows.
+
+Root cause:
+
+- The first online check depended on both presence and friendly-name resolution. In practice, endpoint presence often arrives before the final friendly name.
+
+Fix:
+
+- Treat the device as online when endpoint presence is confirmed or when the HFP input is already active, even if the final friendly name arrives one tick later.
+
+Guardrail:
+
+- Presence signals and endpoint activation are more trustworthy than late UI-name decoration. Do not regress to “name must already exist” logic.
+
+#### 3. Stuck shortcut / Alt release failures
+
+Observed behavior:
+
+- In bad probe or timing paths, the pressed shortcut could remain logically active after the intended release.
+- When `Alt` was left down, the whole Windows input experience degraded badly.
+
+Root cause:
+
+- The shortcut release path depended too heavily on the happy-path probe event flow.
+
+Fix:
+
+- Add a failsafe auto-release path when probe activity goes quiet for too long while a shortcut is still marked as pressed.
+- Record diagnostic snapshots around press/release state transitions.
+
+Guardrail:
+
+- Shortcut release must always have a secondary recovery path. Do not rely only on decode success for releasing modifier keys.
+
+#### 4. Serial ownership interfered with flashing and day-to-day operation
+
+Observed behavior:
+
+- Keeping the command serial port open outside the debug workflow made flashing and reconnect testing harder.
+
+Fix:
+
+- Open command serial only when the debug window is active.
+- Close it again when the debug window or application exits.
+
+Guardrail:
+
+- Serial is a debug/tuning capability, not a permanent background requirement.
+
+### Follow-up TODO List
+
+1. Optimize desktop-side offline detection.
+2. Add low-power settings and wake/reconnect strategy on the firmware side.

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models.app_state import TONE_SLOT_A, TONE_SLOT_B, TONE_SLOT_C, TONE_SLOT_START
+from app.runtime_paths import app_asset_path, app_icon_path
 from app.styles.scaling import DesignScaleContext
 from app.widgets.shortcut_recorder import ShortcutRecorderButton
 from app.windows.frameless import FramelessDraggableWindow
@@ -72,12 +73,15 @@ class MainWindow(FramelessDraggableWindow):
         self.tone_rows: dict[str, ToneRowWidgets] = {}
         self._test_countdown_timers: dict[str, QTimer] = {}
         self._test_countdown_remaining: dict[str, int] = {}
-        assets_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
-        self._gear_icon = QIcon(str(assets_dir / "gear-six.svg"))
-        self._close_icon = QIcon(str(assets_dir / "x.svg"))
-        self._play_icon = QIcon(str(assets_dir / "play-circle.svg"))
+        self._recording_slot: str | None = None
+        self._gear_icon = QIcon(str(app_asset_path("icons", "gear-six.svg")))
+        self._close_icon = QIcon(str(app_asset_path("icons", "x.svg")))
+        self._play_icon = QIcon(str(app_asset_path("icons", "play-circle.svg")))
+        self._app_icon = QIcon(str(app_icon_path()))
         self._quit_requested = False
         self._tray_message_shown = False
+        if not self._app_icon.isNull():
+            self.setWindowIcon(self._app_icon)
         self.tray_icon = self._create_tray_icon()
         self.runtime_refresh_timer = QTimer(self)
         self.runtime_refresh_timer.setInterval(self.RUNTIME_REFRESH_MS)
@@ -271,7 +275,12 @@ class MainWindow(FramelessDraggableWindow):
             value_button.setObjectName("toneRecordButton")
             value_button.setProperty("noWindowDrag", True)
             value_button.shortcutRecorded.connect(
-                lambda keys, tone_slot=slot_id: self.coordinator.set_custom_tone_action(tone_slot, tuple(keys))
+                lambda keys, tone_slot=slot_id: self.coordinator.set_custom_tone_action(tone_slot, tuple(keys)),
+                Qt.QueuedConnection,
+            )
+            value_button.recordingStateChanged.connect(
+                lambda recording, tone_slot=slot_id: self._handle_recording_state_changed(tone_slot, recording),
+                Qt.QueuedConnection,
             )
 
         test_button = QToolButton(wrapper)
@@ -311,7 +320,7 @@ class MainWindow(FramelessDraggableWindow):
         tray = QSystemTrayIcon(self)
         tray_icon = self.windowIcon()
         if tray_icon.isNull():
-            tray_icon = self._gear_icon
+            tray_icon = self._app_icon if not self._app_icon.isNull() else self._gear_icon
         tray.setIcon(tray_icon)
         tray.setToolTip("AirMic 控制台")
 
@@ -321,7 +330,7 @@ class MainWindow(FramelessDraggableWindow):
         self.tray_status_action.setEnabled(False)
         menu.addAction(self.tray_status_action)
         self.tray_restart_action = QAction("重启后台", menu)
-        self.tray_restart_action.triggered.connect(self.coordinator.restart)
+        self.tray_restart_action.triggered.connect(self._restart_from_tray)
         menu.addAction(self.tray_restart_action)
         self.tray_quit_action = QAction("退出后台", menu)
         self.tray_quit_action.triggered.connect(self.quit_from_tray)
@@ -337,6 +346,11 @@ class MainWindow(FramelessDraggableWindow):
             QSystemTrayIcon.ActivationReason.DoubleClick,
         }:
             self.show_from_tray()
+
+    def _restart_from_tray(self) -> None:
+        self.coordinator.restart()
+        self.runtime_refresh_timer.start()
+        self.show_from_tray()
 
     def hide_to_tray(self) -> None:
         self.hide()
@@ -361,11 +375,15 @@ class MainWindow(FramelessDraggableWindow):
 
     def quit_from_tray(self) -> None:
         self._quit_requested = True
+        self.runtime_refresh_timer.stop()
+        self.startup_probe_timer.stop()
         self.tray_icon.hide()
         self.log_window.close()
-        self.coordinator.leave_debug_mode()
+        self.coordinator.stop()
+        app = QApplication.instance()
         self.close()
-        QApplication.instance().quit()
+        if app is not None:
+            QTimer.singleShot(0, app.quit)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._quit_requested:
@@ -390,12 +408,39 @@ class MainWindow(FramelessDraggableWindow):
         for slot_id, row in self.tone_rows.items():
             display_text = self.coordinator.tone_action_display_text(slot_id)
             if isinstance(row.value_button, ShortcutRecorderButton):
-                keys = self.coordinator._keys_for_slot(slot_id) if status.tone_action_map.get(slot_id) == "custom" else ()
+                if status.tone_action_map.get(slot_id) == "custom":
+                    keys = tuple(status.custom_tone_action_map.get(slot_id, ()))
+                else:
+                    keys = ()
                 row.value_button.set_shortcut(keys, display_text)
             else:
                 row.value_button.setText(display_text)
+        self._apply_recording_lock_state()
+
+    def _handle_recording_state_changed(self, slot_id: str, recording: bool) -> None:
+        if recording:
+            self._recording_slot = slot_id
+            self.coordinator.set_shortcut_recording_slot(slot_id)
+        elif self._recording_slot == slot_id:
+            self._recording_slot = None
+            self.coordinator.set_shortcut_recording_slot(None)
+        self._apply_recording_lock_state()
+
+    def _apply_recording_lock_state(self) -> None:
+        active_slot = self._recording_slot
+        for slot_id, row in self.tone_rows.items():
+            if slot_id == TONE_SLOT_START:
+                row.test_button.setEnabled(active_slot is None)
+                continue
+            is_active_row = active_slot == slot_id
+            allow_row = active_slot is None or is_active_row
+            row.test_button.setEnabled(allow_row and self._test_countdown_remaining.get(slot_id, 0) == 0)
+            if isinstance(row.value_button, ShortcutRecorderButton):
+                row.value_button.setEnabled(allow_row)
 
     def _start_test_shortcut_countdown(self, slot_id: str) -> None:
+        if self._recording_slot and self._recording_slot != slot_id:
+            return
         button = self.tone_rows[slot_id].test_button
         if self._test_countdown_remaining.get(slot_id, 0) > 0:
             return
@@ -426,3 +471,4 @@ class MainWindow(FramelessDraggableWindow):
         button.setText("")
         button.setIcon(self._play_icon)
         self.coordinator.test_tone_action(slot_id)
+        self._apply_recording_lock_state()

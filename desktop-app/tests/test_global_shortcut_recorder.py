@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from services.global_shortcut_recorder import (
     GlobalShortcutRecorder,
@@ -73,6 +74,34 @@ class GlobalShortcutRecorderTest(unittest.TestCase):
 
     def test_shortcut_service_defines_digit_1_for_playback(self):
         self.assertIn("1", KEY_SPECS)
+
+    def test_start_recovers_from_stale_stopped_thread(self):
+        recorded_results: list[tuple[str, ...]] = []
+        recorder = GlobalShortcutRecorder(on_recorded=lambda keys: recorded_results.append(keys))
+
+        class FakeStaleThread:
+            def __init__(self) -> None:
+                self.join_called = False
+                self.alive = True
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout=None) -> None:
+                self.join_called = True
+                self.alive = False
+
+        stale_thread = FakeStaleThread()
+        new_thread = mock.Mock()
+        recorder._thread = stale_thread  # type: ignore[assignment]
+        recorder._running.clear()
+
+        with mock.patch("services.global_shortcut_recorder.threading.Thread", return_value=new_thread):
+            started = recorder.start()
+
+        self.assertTrue(started)
+        self.assertTrue(stale_thread.join_called)
+        new_thread.start.assert_called_once()
 
 
 if __name__ == "__main__":

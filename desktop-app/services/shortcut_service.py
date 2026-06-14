@@ -126,6 +126,13 @@ class INPUT(ctypes.Structure):
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wintypes.UINT
 
+def _key_label(key_name: str) -> str:
+    spec = KEY_SPECS.get(key_name)
+    if spec is None:
+        return key_name
+    return str(spec["label"])
+
+
 
 def send_key(key_name: str, down: bool, mode: str = "scan") -> None:
     spec = KEY_SPECS[key_name]
@@ -169,6 +176,19 @@ class ShortcutService:
     @property
     def is_pressed(self) -> bool:
         return bool(self._active_keys)
+
+    def _get_async_key_state(self, key_name: str) -> int:
+        spec = KEY_SPECS[key_name]
+        try:
+            return int(user32.GetAsyncKeyState(spec["vk"]))
+        except Exception:
+            return 0
+
+    def diagnostic_snapshot(self) -> str:
+        active = ",".join(_key_label(key) for key in self._active_keys) or "<none>"
+        os_down_keys = [key for key in self._active_keys if self._get_async_key_state(key) & 0x8000]
+        os_down = ",".join(_key_label(key) for key in os_down_keys) or "<none>"
+        return f"active={active} os_down={os_down} mode={self.send_mode}"
 
     def press(self, keys: Iterable[str]) -> bool:
         normalized = tuple(keys)

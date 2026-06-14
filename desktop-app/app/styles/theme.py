@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.styles.scaling import DesignScaleContext
+from app.runtime_paths import app_asset_path
 
 
 def build_app_stylesheet(scale: DesignScaleContext) -> str:
@@ -18,8 +19,7 @@ def build_app_stylesheet(scale: DesignScaleContext) -> str:
     """
 
     # 图标资源目录。这里主要给下拉箭头读取 svg 用。
-    icons_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
-    caret_down = icons_dir / "caret-down.svg"
+    caret_down = app_asset_path("icons", "caret-down.svg")
 
     # ------------------------------------------------------------------
     # 一、字体分组

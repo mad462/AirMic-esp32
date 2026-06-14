@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.probe_service import (
     PROBE_EVENT_LOG,
@@ -82,6 +83,28 @@ class ProbeServiceTest(unittest.TestCase):
         events = service.consume_output_lines(lines)
 
         self.assertEqual([event.event_kind for event in events], [PROBE_EVENT_LOG, PROBE_EVENT_LOG, PROBE_EVENT_TONE, PROBE_EVENT_RMS])
+
+    def test_start_cleans_up_stale_probe_processes_before_launching_thread(self):
+        service = ProbeService(project_root=Path(r"D:\FUCKIDF\AirMic\desktop-app"))
+        cleaned: list[str] = []
+
+        service.cleanup_stale_processes = lambda emit_log=None: cleaned.append("cleanup")  # type: ignore[method-assign]
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                self._alive = False
+
+            def start(self):
+                return None
+
+            def is_alive(self):
+                return self._alive
+
+        with mock.patch("services.probe_service.threading.Thread", return_value=FakeThread()):
+            started = service.start(lambda event: None)
+
+        self.assertTrue(started)
+        self.assertEqual(cleaned, ["cleanup"])
 
 
 class ProbeWatchdogTest(unittest.TestCase):

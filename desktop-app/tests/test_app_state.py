@@ -22,6 +22,8 @@ from services.backend_coordinator import BackendCoordinator
 from services.settings_service import SettingsService
 from services.audio_status_watch_service import AudioStatusWatchEvent
 from services.probe_service import ProbeEvent
+from services.startup_service import StartupService
+from services.diagnostics_log_service import DiagnosticsLogService
 
 
 class AppStateTest(unittest.TestCase):
@@ -160,6 +162,34 @@ class BackendCoordinatorTest(unittest.TestCase):
             self.assertEqual(restored.status.tone_action_map["tone_a"], "custom")
             self.assertEqual(restored.status.custom_tone_action_map["tone_a"], ("left_ctrl", "a"))
             self.assertEqual(restored.status.tone_action_map["tone_b"], "ctrl_win")
+
+    def test_reads_startup_enabled_state_from_startup_service(self):
+        startup_service = mock.Mock(spec=StartupService)
+        startup_service.is_enabled.return_value = True
+
+        coordinator = BackendCoordinator(
+            startup_service=startup_service,
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+
+        self.assertTrue(coordinator.status.startup_enabled)
+        startup_service.is_enabled.assert_called_once()
+
+    def test_updates_startup_enabled_state_and_logs_result(self):
+        startup_service = mock.Mock(spec=StartupService)
+        startup_service.is_enabled.return_value = False
+        startup_service.set_enabled.return_value = True
+
+        coordinator = BackendCoordinator(
+            startup_service=startup_service,
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+
+        coordinator.set_startup_enabled(True)
+
+        self.assertTrue(coordinator.status.startup_enabled)
+        startup_service.set_enabled.assert_called_once_with(True)
+        self.assertTrue(any("开机启动已开启" in entry.message for entry in coordinator.logs))
 
     def test_ignores_invalid_persisted_shortcut_settings_and_keeps_defaults(self):
         with TemporaryDirectory() as temp_dir:
@@ -813,6 +843,26 @@ class BackendCoordinatorTest(unittest.TestCase):
         self.assertEqual(coordinator.device_status_text(), "在线")
         self.assertEqual(coordinator.system_input_display_text(), "麦克风 (Realtek(R) Audio)")
 
+
+    def test_device_status_stays_online_when_presence_arrives_before_friendly_name(self):
+        coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
+
+        coordinator._handle_audio_status_watch_event_ready(
+            AudioStatusWatchEvent(
+                snapshot=AudioDeviceStatusSnapshot(
+                    current_input_name="麦克风 (Realtek(R) Audio)",
+                    detected_airmic_input_name="",
+                    detected_airmic_input_active=False,
+                    detected_airmic_device_present=True,
+                    has_any_available_input=True,
+                ),
+                raw_text="STATUS\tdefault_comm=<none>\tdefault_multi=麦克风 (Realtek(R) Audio)\tairmic=<none>\tairmic_state=Unplugged\tany_input=true\tdevice_present=true\tbt_connected=true",
+            )
+        )
+
+        self.assertEqual(coordinator.device_status_text(), "在线")
+        self.assertEqual(coordinator.system_input_display_text(), "麦克风 (Realtek(R) Audio)")
+
     def test_device_status_stays_offline_for_stale_hfp_endpoint_without_bt_connection(self):
         coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
 
@@ -962,6 +1012,28 @@ class BackendCoordinatorTest(unittest.TestCase):
             ],
         )
 
+    def test_handle_probe_aux_tone_is_ignored_while_shortcut_recording_is_active(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = BackendCoordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_A, ("left_ctrl", "a"))
+        coordinator.set_custom_tone_action("tone_b", ("b",))
+        sent_actions.clear()
+
+        coordinator.set_shortcut_recording_slot(TONE_SLOT_A)
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE B at 6.120s score=4210.3",
+                "tone_source": "TONE",
+                "tone_event": "B",
+            }
+        )
+
+        self.assertEqual(sent_actions, [])
+        self.assertTrue(any("录制快捷键中，已忽略 Tone B" in item.message for item in coordinator.logs))
+
     def test_probe_preview_logs_command(self):
         coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
 
@@ -994,6 +1066,92 @@ class BackendCoordinatorTest(unittest.TestCase):
         )
 
         self.assertIn("Capturing", coordinator.logs[-1].message)
+
+    def test_tick_runtime_state_restarts_probe_when_probe_thread_died_but_device_still_online(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = BackendCoordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode)),
+            audio_status_provider=lambda: AudioDeviceStatusSnapshot(
+                current_input_name="耳机 (ESP32-AirMic-HFP Hands-Free)",
+                detected_airmic_input_name="耳机 (ESP32-AirMic-HFP Hands-Free)",
+                detected_airmic_input_active=True,
+                detected_airmic_device_present=True,
+                has_any_available_input=True,
+            ),
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+        coordinator.status.state = "running"
+        coordinator.status.listener_phase = "monitoring"
+        coordinator.shortcut_service.press(("right_alt",))
+
+        calls: list[str] = []
+        coordinator.probe_service.is_running = lambda: False  # type: ignore[method-assign]
+        coordinator.stop_probe_monitor = lambda: calls.append("stop")  # type: ignore[method-assign]
+        coordinator.start_probe_monitor = lambda: calls.append("start")  # type: ignore[method-assign]
+
+        coordinator.tick_runtime_state()
+
+        self.assertEqual(calls, ["stop", "start"])
+        self.assertEqual(sent_actions[-1], (("right_alt",), False, "scan"))
+        self.assertFalse(coordinator.shortcut_service.is_pressed)
+        self.assertTrue(any("自动重启音频探针" in entry.message for entry in coordinator.logs))
+
+    def test_tick_runtime_state_restarts_probe_when_monitoring_has_no_probe_events_for_too_long(self):
+        coordinator = BackendCoordinator(
+            audio_status_provider=lambda: AudioDeviceStatusSnapshot(
+                current_input_name="耳机 (ESP32-AirMic-HFP Hands-Free)",
+                detected_airmic_input_name="耳机 (ESP32-AirMic-HFP Hands-Free)",
+                detected_airmic_input_active=True,
+                detected_airmic_device_present=True,
+                has_any_available_input=True,
+            ),
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+        coordinator.status.state = "running"
+        coordinator.status.listener_phase = "monitoring"
+        coordinator._last_probe_event_at = time.monotonic() - 20.0
+        coordinator._last_probe_recovery_at = 0.0
+
+        calls: list[str] = []
+        coordinator.probe_service.is_running = lambda: True  # type: ignore[method-assign]
+        coordinator.stop_probe_monitor = lambda: calls.append("stop")  # type: ignore[method-assign]
+        coordinator.start_probe_monitor = lambda: calls.append("start")  # type: ignore[method-assign]
+
+        coordinator.tick_runtime_state()
+
+        self.assertEqual(calls, ["stop", "start"])
+        self.assertTrue(any("10 秒无探针事件" in entry.message for entry in coordinator.logs))
+
+
+    def test_tick_runtime_state_force_releases_stuck_shortcut_after_idle_timeout(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = BackendCoordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode)),
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+        coordinator.status.state = "running"
+        coordinator.status.listener_phase = "monitoring"
+        coordinator.shortcut_service.press(("right_alt",))
+        coordinator._last_probe_event_at = time.monotonic() - 2.0
+
+        coordinator.tick_runtime_state()
+
+        self.assertFalse(coordinator.shortcut_service.is_pressed)
+        self.assertIn((("right_alt",), False, "scan"), sent_actions)
+        self.assertTrue(any("自动释放卡住的快捷键" in entry.message for entry in coordinator.logs))
+
+    def test_tick_runtime_state_does_not_release_recently_pressed_shortcut(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = BackendCoordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode)),
+            device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"),
+        )
+        coordinator.shortcut_service.press(("right_alt",))
+        coordinator._last_probe_event_at = time.monotonic()
+
+        coordinator.tick_runtime_state()
+
+        self.assertTrue(coordinator.shortcut_service.is_pressed)
 
     def test_qt_subscriber_receives_status_from_background_thread(self):
         coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))

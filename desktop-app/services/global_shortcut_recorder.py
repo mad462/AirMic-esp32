@@ -91,7 +91,16 @@ class GlobalShortcutRecorder:
 
     def start(self) -> bool:
         if self._thread and self._thread.is_alive():
-            return False
+            if not self._running.is_set():
+                try:
+                    self._thread.join(timeout=0.2)
+                except Exception:
+                    pass
+                if self._thread.is_alive():
+                    return False
+                self._thread = None
+            else:
+                return False
         self.reset()
         self._running.set()
         self._thread = threading.Thread(target=self._thread_main, name="airmic-global-shortcut-recorder", daemon=True)
