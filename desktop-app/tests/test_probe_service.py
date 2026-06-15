@@ -31,6 +31,15 @@ class ProbeParserTest(unittest.TestCase):
         self.assertEqual(event.tone_source, "TONE")
         self.assertEqual(event.tone_event, "A")
 
+    def test_parse_tone_stop_line(self):
+        event = parse_probe_output_line("TONE STOP at 7.120s score=5210.3")
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.event_kind, PROBE_EVENT_TONE)
+        self.assertEqual(event.tone_source, "TONE")
+        self.assertEqual(event.tone_event, "STOP")
+
     def test_parse_vad_stop_line(self):
         event = parse_probe_output_line("VAD STOP at 17.970s silenceMs=510")
 
@@ -179,3 +188,5 @@ class ProbeRuntimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

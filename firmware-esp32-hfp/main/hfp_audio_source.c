@@ -51,6 +51,7 @@ static const char *TAG = "hfp_audio";
 typedef enum {
     TONE_EVENT_NONE = 0,
     TONE_EVENT_START,
+    TONE_EVENT_STOP,
     TONE_EVENT_A,
     TONE_EVENT_B,
     TONE_EVENT_C,
@@ -264,6 +265,8 @@ static const char *tone_event_name(tone_event_t event)
     switch (event) {
     case TONE_EVENT_START:
         return "START";
+    case TONE_EVENT_STOP:
+        return "STOP";
     case TONE_EVENT_A:
         return "A";
     case TONE_EVENT_B:
@@ -331,6 +334,10 @@ static float tone_sample_value(tone_event_t event, uint32_t sample_index, uint16
     case TONE_EVENT_C:
         low_freq = 1450.0f;
         high_freq = 2750.0f;
+        break;
+    case TONE_EVENT_STOP:
+        low_freq = 1750.0f;
+        high_freq = 3150.0f;
         break;
     case TONE_EVENT_START:
     default:
@@ -615,6 +622,11 @@ void hfp_audio_source_inject_tone_start(void)
     tone_event_push(TONE_EVENT_START);
 }
 
+void hfp_audio_source_inject_tone_stop(void)
+{
+    tone_event_push(TONE_EVENT_STOP);
+}
+
 void hfp_audio_source_inject_tone_a(void)
 {
     tone_event_push(TONE_EVENT_A);
@@ -728,3 +740,5 @@ void hfp_audio_source_notify_ready(void)
         s_ready_cb();
     }
 }
+
+

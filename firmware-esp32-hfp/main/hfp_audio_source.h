@@ -24,6 +24,7 @@ esp_err_t hfp_audio_source_stop(void);
 void hfp_audio_source_set_ptt(bool pressed);
 bool hfp_audio_source_is_running(void);
 void hfp_audio_source_inject_tone_start(void);
+void hfp_audio_source_inject_tone_stop(void);
 void hfp_audio_source_inject_tone_a(void);
 void hfp_audio_source_inject_tone_b(void);
 void hfp_audio_source_inject_tone_c(void);
@@ -38,3 +39,4 @@ bool hfp_audio_source_is_sr_initialized(void);
 uint32_t hfp_audio_source_read(uint8_t *dst, uint32_t len);
 void hfp_audio_source_set_ready_callback(hfp_audio_source_ready_cb_t callback);
 void hfp_audio_source_notify_ready(void);
+

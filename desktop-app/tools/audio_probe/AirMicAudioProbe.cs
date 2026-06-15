@@ -25,8 +25,8 @@ namespace AirMicAudioProbe
         private const double MinDetectToneShare = 0.06;
         private const double MinCandidateScore = 3.0;
         private const double MinCandidateToneShare = 0.04;
-        private static readonly Dictionary<int, double> LowFreqs = new Dictionary<int, double> { { 0, 1200.0 }, { 1, 1450.0 } };
-        private static readonly Dictionary<int, double> HighFreqs = new Dictionary<int, double> { { 0, 2300.0 }, { 1, 2750.0 } };
+        private static readonly Dictionary<int, double> LowFreqs = new Dictionary<int, double> { { 0, 1200.0 }, { 1, 1450.0 }, { 2, 1750.0 } };
+        private static readonly Dictionary<int, double> HighFreqs = new Dictionary<int, double> { { 0, 2300.0 }, { 1, 2750.0 }, { 2, 3150.0 } };
 
         private static readonly Dictionary<string, string> Events = new Dictionary<string, string>
         {
@@ -34,6 +34,7 @@ namespace AirMicAudioProbe
             { "0:1", "START" },
             { "1:0", "B" },
             { "1:1", "C" },
+            { "2:2", "STOP" },
         };
 
         private static int Main(string[] args)
@@ -358,7 +359,11 @@ namespace AirMicAudioProbe
                     foreach (var toneEvent in detector.Push(resampled))
                     {
                         Console.WriteLine("TONE {0} at {1:F3}s score={2:F1}", toneEvent.Name, toneEvent.TimeSeconds, toneEvent.Score);
-                        if (toneEvent.Name == "START" || toneEvent.Name == "A" || toneEvent.Name == "B" || toneEvent.Name == "C")
+                        if (toneEvent.Name == "STOP")
+                        {
+                            vad.OnStop();
+                        }
+                        else if (toneEvent.Name == "START" || toneEvent.Name == "A" || toneEvent.Name == "B" || toneEvent.Name == "C")
                         {
                             vad.OnStart(toneEvent.Name, blockEndSample);
                         }
@@ -1342,4 +1347,6 @@ namespace AirMicAudioProbe
         }
     }
 }
+
+
 

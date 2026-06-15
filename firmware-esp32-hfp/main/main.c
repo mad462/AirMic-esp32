@@ -136,6 +136,7 @@ static void end_button_session(button_input_id_t input_id)
     if (s_record_mode == RECORD_MODE_PTT) {
         hfp_audio_source_set_ptt(false);
     }
+    hfp_audio_source_inject_tone_stop();
 }
 
 static void log_audio_config(void)
@@ -279,7 +280,7 @@ static void serial_tone_task(void *arg)
 {
     (void)arg;
 
-    ESP_LOGI(TAG, "Serial commands: s=START, a=Tone A, b=Tone B, c=Tone C");
+    ESP_LOGI(TAG, "Serial commands: s=START, e=STOP, a=Tone A, b=Tone B, c=Tone C");
     ESP_LOGI(TAG, "Audio cfg commands: cfg gain <q8>, cfg gate <pcm>, cfg tone <q8>, cfg shift <bits>, cfg show, cfg save, cfg reset, sr on/off/show (compat)");
     ESP_LOGI(TAG, "Record mode commands: mode record ptt, mode record always");
     ESP_LOGI(TAG, "HFP audio commands: audio connect, audio disconnect");
@@ -300,6 +301,9 @@ static void serial_tone_task(void *arg)
                 if (strcmp(line, "s") == 0 || strcmp(line, "S") == 0) {
                     ESP_LOGI(TAG, "serial command: inject START tone");
                     hfp_audio_source_inject_tone_start();
+                } else if (strcmp(line, "e") == 0 || strcmp(line, "E") == 0) {
+                    ESP_LOGI(TAG, "serial command: inject STOP tone");
+                    hfp_audio_source_inject_tone_stop();
                 } else if (strcmp(line, "a") == 0 || strcmp(line, "A") == 0) {
                     ESP_LOGI(TAG, "serial command: inject Tone A");
                     hfp_audio_source_inject_tone_a();
@@ -403,3 +407,4 @@ void app_main(void)
     ESP_LOGI(TAG, "Status LED GPIO%d: slow blink=no SLC, fast blink=SLC only, solid=HFP audio connected",
              STATUS_LED_GPIO);
 }
+
