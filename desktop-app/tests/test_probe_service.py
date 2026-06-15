@@ -140,6 +140,42 @@ class ProbeRuntimeTest(unittest.TestCase):
         self.assertEqual(forwarded[2][0], PROBE_EVENT_RMS)
         self.assertEqual(forwarded[3][1], "No audio callbacks within 4000 ms; exiting for restart.")
 
+    def test_thread_main_reports_probe_exit_code_when_process_ends_unexpectedly(self):
+        service = ProbeService(project_root=Path(r"D:\FUCKIDF\AirMic\desktop-app"))
+        forwarded: list[tuple[str, str]] = []
+        logs: list[str] = []
+
+        class FakeStdout:
+            def __iter__(self):
+                yield "Capturing. Press Ctrl+C to stop.\n"
+                yield "No audio callbacks within 4000 ms; exiting for restart.\n"
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = FakeStdout()
+                self.returncode = 17
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+            def kill(self):
+                return None
+
+        with mock.patch("services.probe_service.Path.exists", return_value=True):
+            with mock.patch("services.probe_service.subprocess.Popen", return_value=FakeProcess()):
+                service._thread_main(
+                    emit=lambda event: forwarded.append((event.event_kind, event.raw_text)),
+                    emit_log=logs.append,
+                )
+
+        self.assertTrue(any("tone probe exited with code 17" in line for line in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

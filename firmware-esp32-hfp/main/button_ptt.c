@@ -9,7 +9,7 @@
 
 static const char *TAG = "button_ptt";
 
-#define BUTTON_TASK_STACK       2048
+#define BUTTON_TASK_STACK       4096
 #define BUTTON_TASK_PRIORITY    4
 #define BUTTON_POLL_INTERVAL_MS 10
 #define BUTTON_DEBOUNCE_MS      60

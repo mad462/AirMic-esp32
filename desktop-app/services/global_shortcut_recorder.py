@@ -32,7 +32,15 @@ WM_QUIT = 0x0012
 
 
 def map_vk_event_to_key_id(vk_code: int, scan_code: int, flags: int) -> str | None:
-    _ = scan_code, flags
+    is_extended = bool(flags & 0x01)
+    if vk_code == 0x11:
+        return "right_ctrl" if is_extended else "left_ctrl"
+    if vk_code == 0x12:
+        return "right_alt" if is_extended else "left_alt"
+    if vk_code == 0x5B:
+        return "left_win"
+    if vk_code == 0x5C:
+        return "right_win"
     return VK_TO_KEY.get(vk_code)
 
 

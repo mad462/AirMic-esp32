@@ -21,3 +21,4 @@ esp_err_t bt_hfp_hf_connect_audio(void);
 esp_err_t bt_hfp_hf_disconnect_audio(void);
 bool bt_hfp_hf_is_slc_connected(void);
 bool bt_hfp_hf_is_audio_connected(void);
+bool bt_hfp_hf_is_audio_connecting(void);

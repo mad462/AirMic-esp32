@@ -68,8 +68,8 @@ TONE_SLOT_DEFINITIONS = (
     ToneSlotDefinition(
         slot_id=TONE_SLOT_START,
         display_name="Start Tone",
-        description="主语音触发音，跟随当前语音模型预设。",
-        configurable=False,
+        description="主语音触发音，默认跟随当前语音模型预设，也可手动覆盖。",
+        configurable=True,
     ),
     ToneSlotDefinition(
         slot_id=TONE_SLOT_A,

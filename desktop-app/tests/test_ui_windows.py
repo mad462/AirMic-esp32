@@ -59,11 +59,11 @@ class MainWindowUiTest(unittest.TestCase):
         self.assertLessEqual(abs(window.system_input_button.y() - window.service_status_button.y()), 4)
         self.assertGreaterEqual(window.system_input_button.x(), window.device_status_button.x())
 
-    def test_start_tone_is_fixed_and_aux_tones_are_recordable(self):
+    def test_start_tone_and_aux_tones_are_all_recordable(self):
         window = self._make_window()
 
-        self.assertEqual(window.tone_rows["start"].value_button.text(), "right Alt")
-        self.assertFalse(window.tone_rows["start"].value_button.isEnabled())
+        self.assertEqual(window.tone_rows["start"].value_button.text(), "右 Alt")
+        self.assertTrue(window.tone_rows["start"].value_button.isEnabled())
         self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "点击录制")
         self.assertTrue(window.tone_rows["tone_a"].test_button.isEnabled())
 
@@ -76,11 +76,13 @@ class MainWindowUiTest(unittest.TestCase):
 
         try:
             record_button = window.tone_rows["tone_a"].value_button
-            assert hasattr(record_button, "shortcutRecorded")
-            record_button.shortcutRecorded.emit(("left_ctrl", "left_win"))
+            assert hasattr(record_button, "recordingCompleted")
+            record_button.click()
+            self.app.processEvents()
+            record_button.recordingCompleted.emit(("left_ctrl", "left_win"))
             self.app.processEvents()
 
-            self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "Ctrl+Win")
+            self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "左 Ctrl + 左 Win")
 
             window.tone_rows["tone_a"].test_button.click()
             import time
@@ -159,11 +161,30 @@ class MainWindowUiTest(unittest.TestCase):
 
         import time
         deadline = time.time() + 1.0
-        while time.time() < deadline and window.tone_rows["tone_a"].value_button.text() != "Ctrl+A":
+        while time.time() < deadline and window.tone_rows["tone_a"].value_button.text() != "左 Ctrl + A":
             self.app.processEvents()
             time.sleep(0.02)
 
-        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "Ctrl+A")
+        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "左 Ctrl + A")
+
+    def test_recorded_right_ctrl_shortcut_keeps_side_prefix_in_ui(self):
+        window = self._make_window()
+        window.show()
+        self.app.processEvents()
+
+        record_button = window.tone_rows["tone_a"].value_button
+        assert hasattr(record_button, "recordingCompleted")
+        record_button.click()
+        self.app.processEvents()
+        record_button.recordingCompleted.emit(("right_ctrl", "a"))
+
+        import time
+        deadline = time.time() + 1.0
+        while time.time() < deadline and window.tone_rows["tone_a"].value_button.text() != "右 Ctrl + A":
+            self.app.processEvents()
+            time.sleep(0.02)
+
+        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "右 Ctrl + A")
 
     def test_background_shortcut_update_is_handled_on_ui_thread(self):
         import threading
@@ -198,13 +219,15 @@ class MainWindowUiTest(unittest.TestCase):
 
         self.assertTrue(called_threads)
         self.assertEqual(called_threads[-1], main_thread_id)
-        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "Ctrl+A")
+        self.assertEqual(window.tone_rows["tone_a"].value_button.text(), "左 Ctrl + A")
 
     def test_recording_one_tone_disables_other_aux_tone_controls(self):
         window = self._make_window()
         window.show()
         self.app.processEvents()
 
+        tone_start_button = window.tone_rows["start"].value_button
+        tone_start_test = window.tone_rows["start"].test_button
         tone_a_button = window.tone_rows["tone_a"].value_button
         tone_b_button = window.tone_rows["tone_b"].value_button
         tone_c_button = window.tone_rows["tone_c"].value_button
@@ -214,11 +237,31 @@ class MainWindowUiTest(unittest.TestCase):
         tone_a_button.click()
         self.app.processEvents()
 
+        self.assertFalse(tone_start_button.isEnabled())
+        self.assertFalse(tone_start_test.isEnabled())
         self.assertTrue(tone_a_button.isEnabled())
         self.assertFalse(tone_b_button.isEnabled())
         self.assertFalse(tone_c_button.isEnabled())
         self.assertFalse(tone_b_test.isEnabled())
         self.assertFalse(tone_c_test.isEnabled())
+
+    def test_recording_start_tone_disables_aux_tone_controls(self):
+        window = self._make_window()
+        window.show()
+        self.app.processEvents()
+
+        tone_start_button = window.tone_rows["start"].value_button
+        tone_a_button = window.tone_rows["tone_a"].value_button
+        tone_b_button = window.tone_rows["tone_b"].value_button
+        tone_c_button = window.tone_rows["tone_c"].value_button
+
+        tone_start_button.click()
+        self.app.processEvents()
+
+        self.assertTrue(tone_start_button.isEnabled())
+        self.assertFalse(tone_a_button.isEnabled())
+        self.assertFalse(tone_b_button.isEnabled())
+        self.assertFalse(tone_c_button.isEnabled())
 
     def test_finishing_recording_restores_other_aux_tone_controls(self):
         window = self._make_window()

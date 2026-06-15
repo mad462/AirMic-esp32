@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from core.models.app_state import (
     AudioDeviceStatusSnapshot,
@@ -89,6 +89,7 @@ class BackendStatus:
     current_voice_model_id: str = DEFAULT_VOICE_MODEL_ID
     tone_action_map: dict[str, str] = field(
         default_factory=lambda: {
+            TONE_SLOT_START: "voice_model_default",
             TONE_SLOT_A: "disabled",
             TONE_SLOT_B: "disabled",
             TONE_SLOT_C: "disabled",
@@ -96,6 +97,7 @@ class BackendStatus:
     )
     custom_tone_action_map: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
+            TONE_SLOT_START: (),
             TONE_SLOT_A: (),
             TONE_SLOT_B: (),
             TONE_SLOT_C: (),
@@ -121,6 +123,8 @@ class BackendCoordinator(QObject):
     statusChanged = Signal(object)
     runtimeSnapshotReady = Signal(object)
     audioStatusWatchEventReady = Signal(object)
+    probeEventReady = Signal(object)
+    probeLogReady = Signal(str)
 
     def __init__(
         self,
@@ -163,11 +167,14 @@ class BackendCoordinator(QObject):
         self._debug_serial_enabled = False
         self._runtime_refresh_inflight = False
         self._last_probe_event_at = time.monotonic()
+        self._last_shortcut_keepalive_at = time.monotonic()
         self._last_probe_recovery_at = 0.0
-        self._stuck_shortcut_timeout_s = 1.0
+        self._stuck_shortcut_timeout_s = 1.4
         self._shortcut_recording_slot: str | None = None
         self.runtimeSnapshotReady.connect(self._handle_runtime_snapshot_ready, Qt.QueuedConnection)
         self.audioStatusWatchEventReady.connect(self._handle_audio_status_watch_event_ready, Qt.QueuedConnection)
+        self.probeEventReady.connect(self._handle_probe_event_ready, Qt.QueuedConnection)
+        self.probeLogReady.connect(self._handle_probe_log_ready, Qt.QueuedConnection)
         self.refresh_runtime_state()
 
     def subscribe(self, callback: Callable[[BackendStatus], None]) -> None:
@@ -195,8 +202,6 @@ class BackendCoordinator(QObject):
         return self._format_binding_for_console(self._current_start_keys())
 
     def tone_action_display_text(self, slot_id: str) -> str:
-        if slot_id == TONE_SLOT_START:
-            return self.current_start_action_display_text()
         keys = self._keys_for_slot(slot_id)
         if not keys:
             return "点击录制"
@@ -480,7 +485,8 @@ class BackendCoordinator(QObject):
     def handle_probe_event(self, event: dict[str, object]) -> None:
         event_kind = str(event.get("event_kind", ""))
         raw_text = str(event.get("raw_text", ""))
-        self._last_probe_event_at = time.monotonic()
+        now = time.monotonic()
+        self._last_probe_event_at = now
 
         if event_kind == "tone":
             tone_source = str(event.get("tone_source", "TONE")).upper()
@@ -495,8 +501,22 @@ class BackendCoordinator(QObject):
                     "C": "Tone C",
                 }.get(tone_event)
                 if tone_label:
+                    before_snapshot = self.shortcut_service.diagnostic_snapshot()
+                    before_active = self.shortcut_service.active_keys
+                    expected_keys = self._current_start_keys() if tone_event == "START" else self._keys_for_slot({
+                        "A": TONE_SLOT_A,
+                        "B": TONE_SLOT_B,
+                        "C": TONE_SLOT_C,
+                    }.get(tone_event, ""))
                     self._handle_tone_label(tone_label)
-                    self._append_diagnostic("tone", f"{tone_source} {tone_event} snapshot={self.shortcut_service.diagnostic_snapshot()}")
+                    after_active = self.shortcut_service.active_keys
+                    if tone_event in ("START", "STOP"):
+                        self._last_shortcut_keepalive_at = now
+                    elif after_active and expected_keys and after_active == expected_keys and before_active == expected_keys:
+                        self._last_shortcut_keepalive_at = now
+                    elif after_active != before_active:
+                        self._last_shortcut_keepalive_at = now
+                    self._append_diagnostic("tone", f"{tone_source} {tone_event} before={before_snapshot} after={self.shortcut_service.diagnostic_snapshot()}")
             if raw_text:
                 self._append_log("PROBE", raw_text)
             self._notify()
@@ -506,6 +526,7 @@ class BackendCoordinator(QObject):
             peak = float(event.get("tone_peak", 0.0))
             rms = float(event.get("tone_rms", 0.0))
             if peak >= 0.02:
+                self._last_shortcut_keepalive_at = now
                 self._append_log("PROBE", f"PC RMS {rms:.6f} peak {peak:.6f}")
                 self._notify()
             return
@@ -526,13 +547,12 @@ class BackendCoordinator(QObject):
 
     def test_current_shortcut(self) -> None:
         keys = self._current_start_keys()
-        action = get_action_preset_by_id(get_voice_model_preset_by_id(self.status.current_voice_model_id).action_preset_id)
         if not keys:
             self._append_log("ACTION", "当前主语音模型未绑定快捷键，测试已跳过。")
             self._notify()
             return
-        self.shortcut_service.tap(keys)
-        self._append_log("ACTION", f"已测试快捷键：{action.chord_label}。")
+        self.shortcut_service.press(keys)
+        self._append_log("ACTION", f"已测试快捷键：{self.current_start_action_display_text()}。")
         self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
         self._notify()
 
@@ -541,18 +561,14 @@ class BackendCoordinator(QObject):
             self._append_log("INFO", f"正在录制 {self._shortcut_recording_slot} 快捷键，已忽略 {slot_id} 测试。")
             self._notify()
             return
-        if slot_id == TONE_SLOT_START:
-            keys = self._current_start_keys()
-            label = self.current_start_action_display_text()
-            tone_name = "Start Tone"
-        else:
-            keys = self._keys_for_slot(slot_id)
-            label = self.tone_action_display_text(slot_id)
-            tone_name = {
-                TONE_SLOT_A: "A Tone",
-                TONE_SLOT_B: "B Tone",
-                TONE_SLOT_C: "C Tone",
-            }.get(slot_id, slot_id)
+        keys = self._keys_for_slot(slot_id)
+        label = self.tone_action_display_text(slot_id)
+        tone_name = {
+            TONE_SLOT_START: "Start Tone",
+            TONE_SLOT_A: "A Tone",
+            TONE_SLOT_B: "B Tone",
+            TONE_SLOT_C: "C Tone",
+        }.get(slot_id, slot_id)
         if not keys:
             self._append_log("ACTION", f"{tone_name} 尚未绑定快捷键。")
             self._notify()
@@ -568,10 +584,10 @@ class BackendCoordinator(QObject):
             return
         self._shortcut_recording_slot = normalized
         if normalized:
-            self._append_log("INFO", f"开始录制 {normalized} 快捷键，已临时屏蔽其它 ABC 动作。")
+            self._append_log("INFO", f"开始录制 {normalized} 快捷键，已临时屏蔽其它 Tone 动作。")
             self._append_diagnostic("shortcut", f"recording_slot={normalized}")
         else:
-            self._append_log("INFO", "快捷键录制结束，已恢复 ABC 动作。")
+            self._append_log("INFO", "快捷键录制结束，已恢复全部 Tone 动作。")
             self._append_diagnostic("shortcut", "recording_slot=<none>")
         self._notify()
 
@@ -605,10 +621,11 @@ class BackendCoordinator(QObject):
     def _maybe_force_release_stuck_shortcut(self) -> None:
         if not self.shortcut_service.is_pressed:
             return
-        if (time.monotonic() - self._last_probe_event_at) < self._stuck_shortcut_timeout_s:
+        if (time.monotonic() - self._last_shortcut_keepalive_at) < self._stuck_shortcut_timeout_s:
             return
         if self.shortcut_service.release():
-            self._append_log("WARN", "自动释放卡住的快捷键：超过 1 秒没有新的探针事件。")
+            timeout_ms = int(self._stuck_shortcut_timeout_s * 1000)
+            self._append_log("WARN", f"自动释放卡住的快捷键：超过 {timeout_ms}ms 没有新的探针事件。")
             self._append_diagnostic("shortcut", f"auto_release {self.shortcut_service.diagnostic_snapshot()}")
             self._notify()
     def _maybe_recover_probe_monitor(self) -> None:
@@ -1016,14 +1033,17 @@ class BackendCoordinator(QObject):
 
         tone_action_map = persisted.get("tone_action_map")
         if isinstance(tone_action_map, dict):
-            for slot_id in (TONE_SLOT_A, TONE_SLOT_B, TONE_SLOT_C):
+            for slot_id in (TONE_SLOT_START, TONE_SLOT_A, TONE_SLOT_B, TONE_SLOT_C):
                 action_id = tone_action_map.get(slot_id)
+                if slot_id == TONE_SLOT_START and action_id == "voice_model_default":
+                    self.status.tone_action_map[slot_id] = action_id
+                    continue
                 if isinstance(action_id, str) and action_id in ACTION_PRESETS_BY_ID:
                     self.status.tone_action_map[slot_id] = action_id
 
         custom_tone_action_map = persisted.get("custom_tone_action_map")
         if isinstance(custom_tone_action_map, dict):
-            for slot_id in (TONE_SLOT_A, TONE_SLOT_B, TONE_SLOT_C):
+            for slot_id in (TONE_SLOT_START, TONE_SLOT_A, TONE_SLOT_B, TONE_SLOT_C):
                 keys = custom_tone_action_map.get(slot_id)
                 if not isinstance(keys, list):
                     continue
@@ -1049,6 +1069,12 @@ class BackendCoordinator(QObject):
         )
 
     def _handle_probe_event_object(self, event: ProbeEvent) -> None:
+        self.probeEventReady.emit(event)
+
+    @Slot(object)
+    def _handle_probe_event_ready(self, event: object) -> None:
+        if not isinstance(event, ProbeEvent):
+            return
         self.handle_probe_event(
             {
                 "event_kind": event.event_kind,
@@ -1061,6 +1087,10 @@ class BackendCoordinator(QObject):
         )
 
     def _handle_probe_log_text(self, text: str) -> None:
+        self.probeLogReady.emit(text)
+
+    @Slot(str)
+    def _handle_probe_log_ready(self, text: str) -> None:
         self._append_log("PROBE", text)
         self._notify()
 
@@ -1092,11 +1122,13 @@ class BackendCoordinator(QObject):
         self._notify()
 
     def _current_start_keys(self) -> tuple[str, ...]:
-        voice_model = get_voice_model_preset_by_id(self.status.current_voice_model_id)
-        action = get_action_preset_by_id(voice_model.action_preset_id)
-        return action.keys
+        return self._keys_for_slot(TONE_SLOT_START)
 
     def _keys_for_slot(self, slot_id: str) -> tuple[str, ...]:
+        if slot_id == TONE_SLOT_START and self.status.tone_action_map[slot_id] == "voice_model_default":
+            voice_model = get_voice_model_preset_by_id(self.status.current_voice_model_id)
+            action = get_action_preset_by_id(voice_model.action_preset_id)
+            return action.keys
         if self.status.tone_action_map[slot_id] == "custom":
             return self.status.custom_tone_action_map[slot_id]
         action = get_action_preset_by_id(self.status.tone_action_map[slot_id])
@@ -1105,15 +1137,7 @@ class BackendCoordinator(QObject):
     def _handle_tone_label(self, tone_label: str) -> None:
         normalized = tone_label.strip().lower()
         if normalized == "start tone":
-            keys = self._current_start_keys()
-            if keys:
-                triggered = self.shortcut_service.press(keys)
-                action = get_action_preset_by_id(get_voice_model_preset_by_id(self.status.current_voice_model_id).action_preset_id)
-                if triggered:
-                    self._append_log("ACTION", f"收到 START：触发 {action.chord_label}。")
-                else:
-                    self._append_log("ACTION", f"收到 START：{action.chord_label} 已经按下。")
-                self._append_diagnostic("shortcut", f"start {self.shortcut_service.diagnostic_snapshot()}")
+            self._handle_press_tone(TONE_SLOT_START, "Start Tone", is_start=True)
             return
         if normalized == "stop tone":
             if self.shortcut_service.release():
@@ -1123,15 +1147,15 @@ class BackendCoordinator(QObject):
             self._append_diagnostic("shortcut", self.shortcut_service.diagnostic_snapshot())
             return
         if normalized == "tone a":
-            self._handle_aux_tone(TONE_SLOT_A, "Tone A")
+            self._handle_press_tone(TONE_SLOT_A, "Tone A")
             return
         if normalized == "tone b":
-            self._handle_aux_tone(TONE_SLOT_B, "Tone B")
+            self._handle_press_tone(TONE_SLOT_B, "Tone B")
             return
         if normalized == "tone c":
-            self._handle_aux_tone(TONE_SLOT_C, "Tone C")
+            self._handle_press_tone(TONE_SLOT_C, "Tone C")
 
-    def _handle_aux_tone(self, slot_id: str, label: str) -> None:
+    def _handle_press_tone(self, slot_id: str, label: str, is_start: bool = False) -> None:
         if self._shortcut_recording_slot and self._shortcut_recording_slot != slot_id:
             self._append_log("INFO", f"录制快捷键中，已忽略 {label}。")
             self._append_diagnostic("shortcut", f"ignored_aux={slot_id} recording_slot={self._shortcut_recording_slot}")
@@ -1140,25 +1164,50 @@ class BackendCoordinator(QObject):
         if not keys:
             self._append_log("ACTION", f"{label} 当前未绑定动作。")
             return
-        self.shortcut_service.tap(keys)
+        if self.shortcut_service.is_pressed:
+            if self.shortcut_service.active_keys == keys:
+                prefix = "start" if is_start else f"keepalive_aux={slot_id}"
+                self._append_diagnostic("shortcut", f"{prefix} active={self.shortcut_service.diagnostic_snapshot()}")
+                return
+            self._append_log("INFO", f"已有其它按键按住，已忽略 {label}。")
+            self._append_diagnostic("shortcut", f"ignored_aux={slot_id} active={self.shortcut_service.diagnostic_snapshot()}")
+            return
+        self._release_shortcut_before_new_event(label)
+        triggered = self.shortcut_service.press(keys)
+        if is_start:
+            display = self.current_start_action_display_text()
+            if triggered:
+                self._append_log("ACTION", f"收到 START：触发 {display}。")
+            else:
+                self._append_log("ACTION", f"收到 START：{display} 已经按下。")
+            self._append_diagnostic("shortcut", f"start {self.shortcut_service.diagnostic_snapshot()}")
+            return
         if self.status.tone_action_map[slot_id] == "custom":
             self._append_log("ACTION", f"{label} 已触发：{format_key_chord(keys)}。")
-            self._append_diagnostic("shortcut", f"{slot_id} tap {self.shortcut_service.diagnostic_snapshot()}")
+            self._append_diagnostic("shortcut", f"{slot_id} press {self.shortcut_service.diagnostic_snapshot()}")
             return
         action = get_action_preset_by_id(self.status.tone_action_map[slot_id])
         self._append_log("ACTION", f"{label} 已触发：{action.chord_label}。")
-        self._append_diagnostic("shortcut", f"{slot_id} tap {self.shortcut_service.diagnostic_snapshot()}")
+        self._append_diagnostic("shortcut", f"{slot_id} press {self.shortcut_service.diagnostic_snapshot()}")
+
+    def _release_shortcut_before_new_event(self, incoming_label: str) -> None:
+        if not self.shortcut_service.is_pressed:
+            return
+        snapshot = self.shortcut_service.diagnostic_snapshot()
+        if self.shortcut_service.release():
+            self._append_log("WARN", f"检测到残留按键，处理 {incoming_label} 前已先释放。")
+            self._append_diagnostic("shortcut", f"pre_release incoming={incoming_label} {snapshot}")
 
     def _format_binding_for_console(self, keys: tuple[str, ...]) -> str:
         if not keys:
             return "点击录制"
         label_map = {
-            "right_alt": "Alt",
-            "left_alt": "Alt",
-            "left_ctrl": "Ctrl",
-            "right_ctrl": "Ctrl",
-            "left_win": "Win",
-            "right_win": "Win",
+            "right_alt": "右 Alt",
+            "left_alt": "左 Alt",
+            "left_ctrl": "左 Ctrl",
+            "right_ctrl": "右 Ctrl",
+            "left_win": "左 Win",
+            "right_win": "右 Win",
             "shift": "Shift",
             "space": "Space",
             "enter": "Enter",
@@ -1171,7 +1220,7 @@ class BackendCoordinator(QObject):
                 parts.append(key.upper())
             else:
                 parts.append(label_map.get(key, key))
-        return "+".join(parts)
+        return " + ".join(parts)
 
     def _open_windows_command(self, command: list[str], success_message: str, failure_prefix: str) -> None:
         try:
@@ -1179,3 +1228,6 @@ class BackendCoordinator(QObject):
             self._append_log("ACTION", success_message)
         except Exception as exc:
             self._append_log("WARN", f"{failure_prefix}: {exc}")
+
+
+

@@ -14,6 +14,7 @@ from core.models.app_state import (
     DeviceCommandResult,
     SerialPortStatusSnapshot,
     TONE_SLOT_A,
+    TONE_SLOT_B,
     TONE_SLOT_START,
     tone_slot_ids,
 )
@@ -40,6 +41,12 @@ class BackendCoordinatorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def _make_coordinator(self, **kwargs) -> BackendCoordinator:
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        settings_service = kwargs.pop("settings_service", SettingsService(Path(temp_dir.name) / "airmic-settings.json"))
+        return BackendCoordinator(settings_service=settings_service, **kwargs)
 
     def test_start_moves_service_to_running_and_logs(self):
         coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
@@ -73,7 +80,7 @@ class BackendCoordinatorTest(unittest.TestCase):
     def test_simulate_start_tone_triggers_current_voice_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
 
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
 
@@ -85,9 +92,21 @@ class BackendCoordinatorTest(unittest.TestCase):
         )
         self.assertEqual(coordinator.status.last_tone, "Start Tone")
 
-    def test_simulate_tone_a_taps_aux_mapping(self):
+    def test_duplicate_start_tone_does_not_release_and_repress_same_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+
+        coordinator.simulate_tone("Start Tone")
+        coordinator.simulate_tone("Start Tone")
+
+        self.assertEqual(sent_actions, [(("right_alt",), True, "scan")])
+        self.assertTrue(any("已经按下" in item.message for item in coordinator.logs))
+
+    def test_simulate_tone_a_presses_aux_mapping_until_release(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
         coordinator.set_tone_action("tone_a", "ctrl_win")
@@ -99,7 +118,6 @@ class BackendCoordinatorTest(unittest.TestCase):
             sent_actions,
             [
                 (("left_ctrl", "left_win"), True, "scan"),
-                (("left_ctrl", "left_win"), False, "scan"),
             ],
         )
 
@@ -150,6 +168,7 @@ class BackendCoordinatorTest(unittest.TestCase):
             )
 
             coordinator.set_voice_model("custom_api")
+            coordinator.set_custom_tone_action("start", ("right_ctrl", "space"))
             coordinator.set_custom_tone_action("tone_a", ("left_ctrl", "a"))
             coordinator.set_tone_action("tone_b", "ctrl_win")
 
@@ -159,6 +178,8 @@ class BackendCoordinatorTest(unittest.TestCase):
             )
 
             self.assertEqual(restored.status.current_voice_model_id, "custom_api")
+            self.assertEqual(restored.status.tone_action_map["start"], "custom")
+            self.assertEqual(restored.status.custom_tone_action_map["start"], ("right_ctrl", "space"))
             self.assertEqual(restored.status.tone_action_map["tone_a"], "custom")
             self.assertEqual(restored.status.custom_tone_action_map["tone_a"], ("left_ctrl", "a"))
             self.assertEqual(restored.status.tone_action_map["tone_b"], "ctrl_win")
@@ -219,7 +240,7 @@ class BackendCoordinatorTest(unittest.TestCase):
 
     def test_stop_tone_releases_active_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
 
@@ -236,7 +257,7 @@ class BackendCoordinatorTest(unittest.TestCase):
 
     def test_test_tone_action_can_preview_start_tone(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
 
@@ -247,6 +268,24 @@ class BackendCoordinatorTest(unittest.TestCase):
             [
                 (("right_alt",), True, "scan"),
                 (("right_alt",), False, "scan"),
+            ],
+        )
+
+    def test_test_tone_action_can_preview_custom_start_tone(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_START, ("right_ctrl", "space"))
+        sent_actions.clear()
+
+        coordinator.test_tone_action(TONE_SLOT_START)
+
+        self.assertEqual(
+            sent_actions,
+            [
+                (("right_ctrl", "space"), True, "scan"),
+                (("right_ctrl", "space"), False, "scan"),
             ],
         )
 
@@ -970,7 +1009,7 @@ class BackendCoordinatorTest(unittest.TestCase):
 
     def test_handle_probe_tone_event_updates_last_tone_and_triggers_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
 
@@ -986,9 +1025,65 @@ class BackendCoordinatorTest(unittest.TestCase):
         self.assertEqual(coordinator.status.last_tone, "TONE START")
         self.assertEqual(sent_actions, [(("right_alt",), True, "scan")])
 
+    def test_handle_probe_start_tone_uses_custom_start_mapping(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_START, ("right_ctrl", "space"))
+        sent_actions.clear()
+
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE START at 5.860s score=9036.1",
+                "tone_source": "TONE",
+                "tone_event": "START",
+            }
+        )
+
+        self.assertEqual(sent_actions, [(("right_ctrl", "space"), True, "scan")])
+
+    def test_handle_probe_start_tone_single_right_ctrl_uses_right_ctrl_mode(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_START, ("right_ctrl",))
+        sent_actions.clear()
+
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE START at 5.860s score=9036.1",
+                "tone_source": "TONE",
+                "tone_event": "START",
+            }
+        )
+
+        self.assertEqual(sent_actions, [(("right_ctrl",), True, "right_ctrl")])
+
+    def test_handle_probe_start_tone_is_ignored_while_shortcut_recording_is_active(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_shortcut_recording_slot("tone_a")
+
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE START at 5.860s score=9036.1",
+                "tone_source": "TONE",
+                "tone_event": "START",
+            }
+        )
+
+        self.assertEqual(sent_actions, [])
+
     def test_handle_probe_tone_a_event_triggers_custom_aux_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
-        coordinator = BackendCoordinator(
+        coordinator = self._make_coordinator(
             shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
         )
         coordinator.set_custom_tone_action(TONE_SLOT_A, ("left_ctrl", "a"))
@@ -1008,7 +1103,60 @@ class BackendCoordinatorTest(unittest.TestCase):
             sent_actions,
             [
                 (("left_ctrl", "a"), True, "scan"),
-                (("left_ctrl", "a"), False, "scan"),
+            ],
+        )
+
+    def test_aux_tone_is_ignored_while_start_shortcut_is_held(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_A, ("left_ctrl", "a"))
+        sent_actions.clear()
+
+        coordinator.simulate_tone("Start Tone")
+        coordinator.simulate_tone("Tone A")
+
+        self.assertEqual(sent_actions, [(("right_alt",), True, "scan")])
+        self.assertTrue(any("已有其它按键按住" in item.message for item in coordinator.logs))
+
+    def test_start_tone_force_releases_stale_shortcut_before_pressing_new_one(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_START, ("right_ctrl", "space"))
+        coordinator.shortcut_service.press(("right_alt",))
+        sent_actions.clear()
+
+        coordinator.simulate_tone("Start Tone")
+
+        self.assertEqual(
+            sent_actions,
+            [
+                (("right_alt",), False, "scan"),
+                (("right_ctrl", "space"), True, "scan"),
+            ],
+        )
+        self.assertTrue(any("检测到残留按键" in item.message for item in coordinator.logs))
+
+    def test_stop_tone_releases_pressed_shortcut_before_other_aux_events(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_A, ("left_ctrl", "a"))
+        coordinator.simulate_tone("Start Tone")
+        sent_actions.clear()
+
+        coordinator.simulate_tone("Stop Tone")
+        coordinator.simulate_tone("Tone A")
+
+        self.assertEqual(
+            sent_actions,
+            [
+                (("right_alt",), False, "scan"),
+                (("left_ctrl", "a"), True, "scan"),
             ],
         )
 
@@ -1132,13 +1280,38 @@ class BackendCoordinatorTest(unittest.TestCase):
         coordinator.status.state = "running"
         coordinator.status.listener_phase = "monitoring"
         coordinator.shortcut_service.press(("right_alt",))
-        coordinator._last_probe_event_at = time.monotonic() - 2.0
+        coordinator._last_probe_event_at = time.monotonic() - 3.0
+        coordinator._last_shortcut_keepalive_at = time.monotonic() - 3.0
 
         coordinator.tick_runtime_state()
 
         self.assertFalse(coordinator.shortcut_service.is_pressed)
         self.assertIn((("right_alt",), False, "scan"), sent_actions)
         self.assertTrue(any("自动释放卡住的快捷键" in entry.message for entry in coordinator.logs))
+
+    def test_ignored_aux_tone_does_not_refresh_stuck_release_timer(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_A, ("a",))
+        coordinator.set_custom_tone_action(TONE_SLOT_B, ("b",))
+        coordinator.simulate_tone("Tone A")
+        sent_actions.clear()
+        coordinator._last_shortcut_keepalive_at = time.monotonic() - 3.0
+
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE B at 6.120s score=4210.3",
+                "tone_source": "TONE",
+                "tone_event": "B",
+            }
+        )
+        coordinator.tick_runtime_state()
+
+        self.assertFalse(coordinator.shortcut_service.is_pressed)
+        self.assertIn((("a",), False, "scan"), sent_actions)
 
     def test_tick_runtime_state_does_not_release_recently_pressed_shortcut(self):
         sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
@@ -1148,11 +1321,71 @@ class BackendCoordinatorTest(unittest.TestCase):
         )
         coordinator.shortcut_service.press(("right_alt",))
         coordinator._last_probe_event_at = time.monotonic()
+        coordinator._last_shortcut_keepalive_at = time.monotonic()
 
         coordinator.tick_runtime_state()
 
         self.assertTrue(coordinator.shortcut_service.is_pressed)
 
+    def test_same_aux_tone_refreshes_keepalive_without_repressing_shortcut(self):
+        sent_actions: list[tuple[tuple[str, ...], bool, str]] = []
+        coordinator = self._make_coordinator(
+            shortcut_sender=lambda keys, down, mode: sent_actions.append((tuple(keys), down, mode))
+        )
+        coordinator.set_custom_tone_action(TONE_SLOT_B, ("right_ctrl",))
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE B at 6.120s score=4210.3",
+                "tone_source": "TONE",
+                "tone_event": "B",
+            }
+        )
+        sent_actions.clear()
+        coordinator._last_shortcut_keepalive_at = time.monotonic() - 1.1
+
+        coordinator.handle_probe_event(
+            {
+                "event_kind": "tone",
+                "raw_text": "PC TONE B at 6.420s score=4220.1",
+                "tone_source": "TONE",
+                "tone_event": "B",
+            }
+        )
+        coordinator.tick_runtime_state()
+
+        self.assertTrue(coordinator.shortcut_service.is_pressed)
+        self.assertEqual(sent_actions, [])
+
+    def test_probe_event_object_is_marshaled_back_to_qt_thread(self):
+        coordinator = self._make_coordinator()
+        handled_threads: list[object] = []
+        original = coordinator.handle_probe_event
+
+        def tracked_handler(event: dict[str, object]) -> None:
+            handled_threads.append(threading.current_thread())
+            original(event)
+
+        coordinator.handle_probe_event = tracked_handler  # type: ignore[method-assign]
+
+        worker = threading.Thread(
+            target=lambda: coordinator._handle_probe_event_object(
+                ProbeEvent(
+                    event_kind="tone",
+                    raw_text="PC TONE B at 6.120s score=4210.3",
+                    tone_source="TONE",
+                    tone_event="B",
+                )
+            )
+        )
+        worker.start()
+        worker.join()
+
+        self.assertEqual(handled_threads, [])
+        self.app.processEvents()
+
+        self.assertEqual(len(handled_threads), 1)
+        self.assertIs(handled_threads[0], threading.main_thread())
     def test_qt_subscriber_receives_status_from_background_thread(self):
         coordinator = BackendCoordinator(device_command_sender=lambda port_name, commands: DeviceCommandResult(ok=False, error="skip"))
         received_states: list[str] = []
@@ -1175,3 +1408,9 @@ class BackendCoordinatorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+
+

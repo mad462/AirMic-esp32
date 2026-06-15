@@ -50,6 +50,11 @@ class GlobalShortcutRecorderTest(unittest.TestCase):
 
         self.assertEqual(key_id, "right_alt")
 
+    def test_vk_mapping_distinguishes_right_ctrl(self):
+        key_id = map_vk_event_to_key_id(vk_code=0xA3, scan_code=0x1D, flags=0x01)
+
+        self.assertEqual(key_id, "right_ctrl")
+
     def test_vk_mapping_maps_space(self):
         key_id = map_vk_event_to_key_id(vk_code=0x20, scan_code=0x39, flags=0x00)
 

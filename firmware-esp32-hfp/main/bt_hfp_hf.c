@@ -19,6 +19,7 @@ static const char *TAG = "bt_hfp_hf";
 
 #define HFP_SLC_AUTOCONNECT_DELAY_MS     3000
 #define HFP_SLC_AUTOCONNECT_INTERVAL_MS  5000
+#define HFP_AUDIO_CONNECT_MIN_INTERVAL_MS 800
 #define HFP_NVS_NAMESPACE                "airmic_bt"
 #define HFP_NVS_KEY_PEER_BDA             "peer_bda"
 
@@ -28,9 +29,11 @@ static esp_bd_addr_t s_preferred_bda;
 static bool s_has_preferred_bda;
 static bool s_slc_connected;
 static bool s_audio_connected;
+static bool s_audio_connecting;
 static esp_hf_client_connection_state_t s_connection_state;
 static uint16_t s_sync_conn_handle;
 static TaskHandle_t s_slc_autoconnect_task;
+static TickType_t s_last_audio_connect_tick;
 
 static const char *connection_state_str(esp_hf_client_connection_state_t state)
 {
@@ -222,6 +225,7 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
         } else if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED) {
             s_slc_connected = false;
             s_audio_connected = false;
+            s_audio_connecting = false;
             s_has_peer_bda = false;
             hfp_audio_source_stop();
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
@@ -233,13 +237,17 @@ static void hf_client_cb(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_
                  audio_state_str(param->audio_stat.state),
                  param->audio_stat.sync_conn_handle);
 
-        if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED ||
-            param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
+        if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTING) {
+            s_audio_connecting = true;
+        } else if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED ||
+                   param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
+            s_audio_connecting = false;
             s_audio_connected = true;
             s_sync_conn_handle = param->audio_stat.sync_conn_handle;
             esp_hf_client_register_data_callback(hfp_incoming_data_cb, hfp_outgoing_data_cb);
             hfp_audio_source_start();
         } else if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
+            s_audio_connecting = false;
             s_audio_connected = false;
             s_sync_conn_handle = 0;
             hfp_audio_source_stop();
@@ -367,8 +375,27 @@ esp_err_t bt_hfp_hf_connect_audio(void)
         return ESP_OK;
     }
 
+    if (s_audio_connecting) {
+        ESP_LOGI(TAG, "skip HFP audio connect: already connecting");
+        return ESP_OK;
+    }
+
+    TickType_t now = xTaskGetTickCount();
+    if (s_last_audio_connect_tick != 0 &&
+        (now - s_last_audio_connect_tick) < pdMS_TO_TICKS(HFP_AUDIO_CONNECT_MIN_INTERVAL_MS)) {
+        ESP_LOGI(TAG, "skip HFP audio connect: throttled (%ums window)",
+                 HFP_AUDIO_CONNECT_MIN_INTERVAL_MS);
+        return ESP_OK;
+    }
+
     ESP_LOGI(TAG, "requesting HFP audio connection");
-    return esp_hf_client_connect_audio(s_peer_bda);
+    s_last_audio_connect_tick = now;
+    s_audio_connecting = true;
+    esp_err_t ret = esp_hf_client_connect_audio(s_peer_bda);
+    if (ret != ESP_OK) {
+        s_audio_connecting = false;
+    }
+    return ret;
 }
 
 esp_err_t bt_hfp_hf_disconnect_audio(void)
@@ -393,4 +420,9 @@ bool bt_hfp_hf_is_slc_connected(void)
 bool bt_hfp_hf_is_audio_connected(void)
 {
     return s_audio_connected;
+}
+
+bool bt_hfp_hf_is_audio_connecting(void)
+{
+    return s_audio_connecting;
 }

@@ -114,7 +114,7 @@ class MainWindow(FramelessDraggableWindow):
         card_layout.addWidget(self._build_header())
         card_layout.addWidget(self._build_status_row())
         card_layout.addWidget(self._make_divider())
-        card_layout.addWidget(self._build_tone_row("Start Tone", TONE_SLOT_START, fixed=True))
+        card_layout.addWidget(self._build_tone_row("Start Tone", TONE_SLOT_START))
         card_layout.addWidget(self._make_divider())
         card_layout.addWidget(self._build_tone_row("A Tone", TONE_SLOT_A))
         card_layout.addWidget(self._make_divider())
@@ -263,25 +263,17 @@ class MainWindow(FramelessDraggableWindow):
         name_label.setObjectName("toneName")
         name_label.setMinimumWidth(self.scale.scale_value(92))
 
-        if fixed:
-            value_button = QPushButton("right Alt", wrapper)
-            value_button.setEnabled(False)
-            value_button.setCursor(QCursor(Qt.ArrowCursor))
-            value_button.setFlat(True)
-            value_button.setObjectName("toneValueStatic")
-            value_button.setProperty("noWindowDrag", True)
-        else:
-            value_button = ShortcutRecorderButton(wrapper)
-            value_button.setObjectName("toneRecordButton")
-            value_button.setProperty("noWindowDrag", True)
-            value_button.shortcutRecorded.connect(
-                lambda keys, tone_slot=slot_id: self.coordinator.set_custom_tone_action(tone_slot, tuple(keys)),
-                Qt.QueuedConnection,
-            )
-            value_button.recordingStateChanged.connect(
-                lambda recording, tone_slot=slot_id: self._handle_recording_state_changed(tone_slot, recording),
-                Qt.QueuedConnection,
-            )
+        value_button = ShortcutRecorderButton(wrapper)
+        value_button.setObjectName("toneRecordButton")
+        value_button.setProperty("noWindowDrag", True)
+        value_button.shortcutRecorded.connect(
+            lambda keys, tone_slot=slot_id: self.coordinator.set_custom_tone_action(tone_slot, tuple(keys)),
+            Qt.QueuedConnection,
+        )
+        value_button.recordingStateChanged.connect(
+            lambda recording, tone_slot=slot_id: self._handle_recording_state_changed(tone_slot, recording),
+            Qt.QueuedConnection,
+        )
 
         test_button = QToolButton(wrapper)
         test_button.setCursor(Qt.PointingHandCursor)
@@ -429,9 +421,6 @@ class MainWindow(FramelessDraggableWindow):
     def _apply_recording_lock_state(self) -> None:
         active_slot = self._recording_slot
         for slot_id, row in self.tone_rows.items():
-            if slot_id == TONE_SLOT_START:
-                row.test_button.setEnabled(active_slot is None)
-                continue
             is_active_row = active_slot == slot_id
             allow_row = active_slot is None or is_active_row
             row.test_button.setEnabled(allow_row and self._test_countdown_remaining.get(slot_id, 0) == 0)

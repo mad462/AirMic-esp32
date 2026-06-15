@@ -258,6 +258,7 @@ Get-CimInstance Win32_Process |
         try:
             self.pump_output_lines(self._iter_stdout(proc.stdout), emit=emit)
         finally:
+            exit_code = proc.poll()
             if self.stop_requested.is_set() and proc.poll() is None:
                 try:
                     proc.terminate()
@@ -267,6 +268,9 @@ Get-CimInstance Win32_Process |
                         proc.kill()
                     except Exception:
                         pass
+                exit_code = proc.poll()
+            elif emit_log and exit_code is not None:
+                emit_log(f"tone probe exited with code {exit_code}")
             self.process = None
             self.thread = None
 

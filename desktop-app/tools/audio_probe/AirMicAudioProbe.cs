@@ -19,8 +19,8 @@ namespace AirMicAudioProbe
         private const double StartRms = 0.008;
         private const double VadVoiceRms = 0.0028;
         private const int VadStartGraceMs = 220;
-        private const int VadSilenceMs = 500;
-        private const int VadNoSpeechStopMs = 1000;
+        private const int VadSilenceMs = 350;
+        private const int VadNoSpeechStopMs = 700;
         private const double MinDetectScore = 5.0;
         private const double MinDetectToneShare = 0.06;
         private const double MinCandidateScore = 3.0;
@@ -358,9 +358,9 @@ namespace AirMicAudioProbe
                     foreach (var toneEvent in detector.Push(resampled))
                     {
                         Console.WriteLine("TONE {0} at {1:F3}s score={2:F1}", toneEvent.Name, toneEvent.TimeSeconds, toneEvent.Score);
-                        if (toneEvent.Name == "START")
+                        if (toneEvent.Name == "START" || toneEvent.Name == "A" || toneEvent.Name == "B" || toneEvent.Name == "C")
                         {
-                            vad.OnStart(blockEndSample);
+                            vad.OnStart(toneEvent.Name, blockEndSample);
                         }
                     }
 
@@ -1200,6 +1200,7 @@ namespace AirMicAudioProbe
             private readonly Action<string> logLine;
             private bool active;
             private bool voiceSeen;
+            private string activeToneName = string.Empty;
             private long startSample;
             private long graceUntilSample;
             private long lastVoiceSample;
@@ -1210,19 +1211,33 @@ namespace AirMicAudioProbe
                 this.logLine = logLine;
             }
 
-            public void OnStart(long absoluteSample)
+            public void OnStart(string toneName, long absoluteSample)
             {
+                string nextToneName = toneName ?? string.Empty;
+                if (active && string.Equals(activeToneName, nextToneName, StringComparison.Ordinal))
+                {
+                    if (!voiceSeen)
+                    {
+                        startSample = absoluteSample;
+                        graceUntilSample = absoluteSample + sampleRate * VadStartGraceMs / 1000;
+                        lastVoiceSample = absoluteSample;
+                        logLine(string.Format("VAD refreshed by {0} at {1:F3}s graceMs={2}", activeToneName, absoluteSample / (double)sampleRate, VadStartGraceMs));
+                    }
+                    return;
+                }
                 active = true;
+                activeToneName = nextToneName;
                 voiceSeen = false;
                 startSample = absoluteSample;
                 graceUntilSample = absoluteSample + sampleRate * VadStartGraceMs / 1000;
                 lastVoiceSample = absoluteSample;
-                logLine(string.Format("VAD armed at {0:F3}s graceMs={1}", absoluteSample / (double)sampleRate, VadStartGraceMs));
+                logLine(string.Format("VAD armed by {0} at {1:F3}s graceMs={2}", activeToneName, absoluteSample / (double)sampleRate, VadStartGraceMs));
             }
 
             public void OnStop()
             {
                 active = false;
+                activeToneName = string.Empty;
                 voiceSeen = false;
             }
 

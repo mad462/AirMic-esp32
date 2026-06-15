@@ -27,12 +27,54 @@ typedef enum {
 } record_mode_t;
 
 static record_mode_t s_record_mode = RECORD_MODE_PTT;
+static bool s_active_button_valid;
+static button_input_id_t s_active_button = BUTTON_INPUT_PTT;
+
+static const char *button_label(button_input_id_t input_id)
+{
+    switch (input_id) {
+    case BUTTON_INPUT_PTT:
+        return "START";
+    case BUTTON_INPUT_TONE_A:
+        return "Tone A";
+    case BUTTON_INPUT_TONE_B:
+        return "Tone B";
+    case BUTTON_INPUT_TONE_C:
+        return "Tone C";
+    default:
+        return "Unknown";
+    }
+}
+
+static void inject_tone_for_button(button_input_id_t input_id)
+{
+    switch (input_id) {
+    case BUTTON_INPUT_PTT:
+        hfp_audio_source_inject_tone_start();
+        break;
+    case BUTTON_INPUT_TONE_A:
+        hfp_audio_source_inject_tone_a();
+        break;
+    case BUTTON_INPUT_TONE_B:
+        hfp_audio_source_inject_tone_b();
+        break;
+    case BUTTON_INPUT_TONE_C:
+        hfp_audio_source_inject_tone_c();
+        break;
+    default:
+        break;
+    }
+}
 
 static void request_audio_connect_if_needed(void)
 {
-    if (bt_hfp_hf_is_slc_connected() && !bt_hfp_hf_is_audio_connected()) {
+    if (bt_hfp_hf_is_slc_connected() &&
+        !bt_hfp_hf_is_audio_connected() &&
+        !bt_hfp_hf_is_audio_connecting()) {
         esp_err_t ret = bt_hfp_hf_connect_audio();
-        ESP_LOGI(TAG, "connect HFP audio result: %s", esp_err_to_name(ret));
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "connect HFP audio failed: %s", esp_err_to_name(ret));
+        }
     }
 }
 
@@ -68,9 +110,32 @@ static void log_boot_diagnostics(void)
 
 static void apply_record_mode(void)
 {
-    bool gate_open = (s_record_mode == RECORD_MODE_ALWAYS);
+    bool gate_open = (s_record_mode == RECORD_MODE_ALWAYS) || s_active_button_valid;
     hfp_audio_source_set_ptt(gate_open);
-    ESP_LOGI(TAG, "record mode=%s", gate_open ? "always" : "ptt");
+    ESP_LOGI(TAG, "record mode=%s",
+             s_record_mode == RECORD_MODE_ALWAYS ? "always" : "ptt");
+}
+
+static void begin_button_session(button_input_id_t input_id)
+{
+    s_active_button = input_id;
+    s_active_button_valid = true;
+    if (s_record_mode == RECORD_MODE_PTT) {
+        hfp_audio_source_set_ptt(true);
+    }
+    inject_tone_for_button(input_id);
+    request_audio_connect_if_needed();
+}
+
+static void end_button_session(button_input_id_t input_id)
+{
+    if (!s_active_button_valid || s_active_button != input_id) {
+        return;
+    }
+    s_active_button_valid = false;
+    if (s_record_mode == RECORD_MODE_PTT) {
+        hfp_audio_source_set_ptt(false);
+    }
 }
 
 static void log_audio_config(void)
@@ -283,39 +348,30 @@ static void ptt_changed(button_input_id_t input_id, bool pressed, void *user_ctx
              bt_hfp_hf_is_slc_connected() ? "connected" : "no",
              bt_hfp_hf_is_audio_connected() ? "connected" : "no");
 
-    switch (input_id) {
-    case BUTTON_INPUT_PTT:
-        if (pressed) {
-            if (s_record_mode == RECORD_MODE_PTT) {
-                hfp_audio_source_set_ptt(true);
-            }
-            hfp_audio_source_inject_tone_start();
-            request_audio_connect_if_needed();
-        } else if (s_record_mode == RECORD_MODE_PTT) {
-            hfp_audio_source_set_ptt(false);
+    if (pressed) {
+        if (s_active_button_valid && s_active_button != input_id) {
+            ESP_LOGW(TAG, "ignore %s press while %s session active",
+                     button_label(input_id), button_label(s_active_button));
+            return;
         }
-        break;
-    case BUTTON_INPUT_TONE_A:
-        if (pressed) {
-            hfp_audio_source_inject_tone_a();
-            request_audio_connect_if_needed();
+        if (s_active_button_valid && s_active_button == input_id) {
+            ESP_LOGI(TAG, "%s press ignored: session already active", button_label(input_id));
+            return;
         }
-        break;
-    case BUTTON_INPUT_TONE_B:
-        if (pressed) {
-            hfp_audio_source_inject_tone_b();
-            request_audio_connect_if_needed();
-        }
-        break;
-    case BUTTON_INPUT_TONE_C:
-        if (pressed) {
-            hfp_audio_source_inject_tone_c();
-            request_audio_connect_if_needed();
-        }
-        break;
-    default:
-        break;
+        begin_button_session(input_id);
+        return;
     }
+
+    if (!s_active_button_valid) {
+        ESP_LOGI(TAG, "%s release ignored: no active session", button_label(input_id));
+        return;
+    }
+    if (s_active_button != input_id) {
+        ESP_LOGI(TAG, "%s release ignored: active session belongs to %s",
+                 button_label(input_id), button_label(s_active_button));
+        return;
+    }
+    end_button_session(input_id);
 }
 
 void app_main(void)
@@ -338,7 +394,7 @@ void app_main(void)
     BaseType_t serial_task_ok = xTaskCreate(serial_tone_task, "tone_serial", TONE_SERIAL_TASK_STACK_BYTES, NULL, 2, NULL);
     ESP_ERROR_CHECK(serial_task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
-    ESP_LOGI(TAG, "Ready. Pair '%s' for HFP microphone. GPIO%d=Start/PTT, GPIO%d=Tone A, GPIO%d=Tone B, GPIO%d=Tone C.",
+    ESP_LOGI(TAG, "Ready. Pair '%s' for HFP microphone. GPIO%d=Start, GPIO%d=Tone A, GPIO%d=Tone B, GPIO%d=Tone C.",
              BT_HFP_HF_DEVICE_NAME,
              PTT_BUTTON_GPIO,
              TONE_A_BUTTON_GPIO,

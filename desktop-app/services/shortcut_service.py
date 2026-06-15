@@ -136,17 +136,24 @@ def _key_label(key_name: str) -> str:
 
 def send_key(key_name: str, down: bool, mode: str = "scan") -> None:
     spec = KEY_SPECS[key_name]
-    use_vk = mode == "vk"
+    use_vk = mode in {"vk", "right_ctrl"}
     flags = KEYEVENTF_EXTENDEDKEY if use_vk else KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
     if not spec["extended"]:
         flags &= ~KEYEVENTF_EXTENDEDKEY
     if not down:
         flags |= KEYEVENTF_KEYUP
 
-    event = INPUT(
-        type=INPUT_KEYBOARD,
-        u=INPUT_UNION(ki=KEYBDINPUT(spec["vk"] if use_vk else 0, 0 if use_vk else spec["scan"], flags, 0, 0)),
-    )
+    if mode == "right_ctrl":
+        flags |= KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
+        event = INPUT(
+            type=INPUT_KEYBOARD,
+            u=INPUT_UNION(ki=KEYBDINPUT(0x11, 0x1D, flags, 0, 0)),
+        )
+    else:
+        event = INPUT(
+            type=INPUT_KEYBOARD,
+            u=INPUT_UNION(ki=KEYBDINPUT(spec["vk"] if use_vk else 0, 0 if use_vk else spec["scan"], flags, 0, 0)),
+        )
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -168,6 +175,7 @@ class ShortcutService:
         self.sender = sender or send_combo
         self.send_mode = send_mode
         self._active_keys: tuple[str, ...] = ()
+        self._active_mode = send_mode
 
     @property
     def active_keys(self) -> tuple[str, ...]:
@@ -188,7 +196,13 @@ class ShortcutService:
         active = ",".join(_key_label(key) for key in self._active_keys) or "<none>"
         os_down_keys = [key for key in self._active_keys if self._get_async_key_state(key) & 0x8000]
         os_down = ",".join(_key_label(key) for key in os_down_keys) or "<none>"
-        return f"active={active} os_down={os_down} mode={self.send_mode}"
+        return f"active={active} os_down={os_down} mode={self._active_mode}"
+
+    def _resolve_mode(self, keys: tuple[str, ...], requested_mode: str | None = None) -> str:
+        mode = requested_mode or self.send_mode
+        if len(keys) == 1 and keys[0] == "right_ctrl":
+            return "right_ctrl"
+        return mode
 
     def press(self, keys: Iterable[str]) -> bool:
         normalized = tuple(keys)
@@ -199,24 +213,29 @@ class ShortcutService:
             return False
         if self._active_keys:
             self.release()
-        self.sender(list(normalized), True, self.send_mode)
+        resolved_mode = self._resolve_mode(normalized)
+        self.sender(list(normalized), True, resolved_mode)
         self._active_keys = normalized
+        self._active_mode = resolved_mode
         return True
 
     def release(self) -> bool:
         if not self._active_keys:
             return False
-        self.sender(list(self._active_keys), False, self.send_mode)
+        self.sender(list(self._active_keys), False, self._active_mode)
         self._active_keys = ()
+        self._active_mode = self.send_mode
         return True
 
     def tap(self, keys: Iterable[str]) -> bool:
         normalized = tuple(keys)
         if not normalized:
             return False
-        self.sender(list(normalized), True, self.send_mode)
-        self.sender(list(normalized), False, self.send_mode)
+        resolved_mode = self._resolve_mode(normalized)
+        self.sender(list(normalized), True, resolved_mode)
+        self.sender(list(normalized), False, resolved_mode)
         self._active_keys = ()
+        self._active_mode = self.send_mode
         return True
 
     def release_if_matches(self, keys: Iterable[str]) -> bool:
@@ -224,3 +243,4 @@ class ShortcutService:
         if self._active_keys != normalized:
             return False
         return self.release()
+

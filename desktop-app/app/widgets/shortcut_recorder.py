@@ -118,13 +118,22 @@ class ShortcutRecorderButton(QPushButton):
 
     def _map_qt_key_event(self, event: QKeyEvent) -> str | None:
         key = event.key()
+        native_vk = int(event.nativeVirtualKey())
+        native_scan = int(event.nativeScanCode())
+        native_modifiers = int(event.nativeModifiers())
         if key == Qt.Key_Control:
+            if native_vk == 0xA3 or native_scan == 0x11D or (native_modifiers & 0x01000000):
+                return "right_ctrl"
             return "left_ctrl"
         if key == Qt.Key_Alt:
+            if native_vk == 0xA5 or native_scan == 0x138 or (native_modifiers & 0x01000000):
+                return "right_alt"
             return "left_alt"
         if key == Qt.Key_Shift:
             return "shift"
         if key == Qt.Key_Meta:
+            if native_vk == 0x5C:
+                return "right_win"
             return "left_win"
         if key == Qt.Key_Space:
             return "space"
@@ -142,12 +151,12 @@ class ShortcutRecorderButton(QPushButton):
 
     def _format_shortcut_text(self, keys: tuple[str, ...]) -> str:
         label_map = {
-            "left_ctrl": "Ctrl",
-            "right_ctrl": "Ctrl",
-            "left_alt": "Alt",
-            "right_alt": "Alt",
-            "left_win": "Win",
-            "right_win": "Win",
+            "left_ctrl": "左 Ctrl",
+            "right_ctrl": "右 Ctrl",
+            "left_alt": "左 Alt",
+            "right_alt": "右 Alt",
+            "left_win": "左 Win",
+            "right_win": "右 Win",
             "shift": "Shift",
             "space": "Space",
             "enter": "Enter",
@@ -160,4 +169,4 @@ class ShortcutRecorderButton(QPushButton):
                 parts.append(key.upper())
             else:
                 parts.append(label_map.get(key, key))
-        return "+".join(parts) if parts else "点击录制"
+        return " + ".join(parts) if parts else "点击录制"

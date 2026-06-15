@@ -59,6 +59,21 @@ class ShortcutCatalogTest(unittest.TestCase):
             ],
         )
 
+    def test_shortcut_service_uses_right_ctrl_specific_mode_for_single_right_ctrl(self):
+        sent_events: list[tuple[tuple[str, ...], bool, str]] = []
+        service = ShortcutService(sender=lambda keys, down, mode: sent_events.append((tuple(keys), down, mode)))
+
+        service.press(("right_ctrl",))
+        service.release()
+
+        self.assertEqual(
+            sent_events,
+            [
+                (("right_ctrl",), True, "right_ctrl"),
+                (("right_ctrl",), False, "right_ctrl"),
+            ],
+        )
+
     def test_shortcut_service_diagnostic_snapshot_includes_active_keys(self):
         service = ShortcutService(sender=lambda keys, down, mode: None)
         service.press(("right_alt",))
